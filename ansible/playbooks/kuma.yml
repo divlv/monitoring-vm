@@ -1,0 +1,21 @@
+# The Kuma manifest itself is applied by K3s (see k3s.yml); here we only wait for it.
+
+- name: Kuma - wait for the deployment (image pull + first start on 1 vCPU can take minutes)
+  ansible.builtin.command: "k3s kubectl -n {{ kuma_namespace }} rollout status deployment/uptime-kuma --timeout=60s"
+  register: kuma_ready
+  retries: 40
+  delay: 15
+  until: kuma_ready.rc == 0
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Kuma - pods and ingress (for the log)
+  ansible.builtin.command: "k3s kubectl -n {{ kuma_namespace }} get pods,svc,ingress -o wide"
+  register: kuma_state
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Kuma - state
+  ansible.builtin.debug:
+    var: kuma_state.stdout_lines

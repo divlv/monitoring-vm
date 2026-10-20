@@ -1,0 +1,46 @@
+# Creates the Kuma administrator, the Telegram alert channel, the two Groups and all
+# Targets from the Private config. The script (files/kuma/provision_kuma.py) reads the
+# secrets from the config file itself, so none of them passes through Ansible variables
+# or command lines. It only creates/updates, it never deletes anything.
+# --check on the script (not Ansible's --check) shows what it WOULD change.
+
+- name: Provision - python virtualenv with the Kuma API client (system packages kept for PyYAML)
+  ansible.builtin.pip:
+    name: "uptime-kuma-api2=={{ kuma_api_version }}"
+    virtualenv: "{{ kuma_venv }}"
+    virtualenv_command: python3 -m venv
+    virtualenv_site_packages: true
+
+- name: Provision - cluster IP of the Kuma service (the host reaches it through kube-proxy)
+  ansible.builtin.command: "k3s kubectl -n {{ kuma_namespace }} get service uptime-kuma -o jsonpath={.spec.clusterIP}"
+  register: kuma_cluster_ip
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Provision - Kuma Groups, Targets and alert channel
+  ansible.builtin.command:
+    argv:
+      - "{{ kuma_venv }}/bin/python"
+      - -I
+      - "{{ files_dir }}/kuma/provision_kuma.py"
+      - --url
+      - "http://{{ kuma_cluster_ip.stdout }}:3001"
+      - --config
+      - "{{ config_file }}"
+      - --run-id
+      - "{{ run_id }}"
+      - --log-file
+      - "{{ log_dir }}/kuma_provision_{{ run_id }}.log"
+  register: kuma_provision
+  changed_when: "'RESULT changed=0 ' not in kuma_provision.stdout"
+  when: not ansible_check_mode
+
+- name: Provision - result
+  ansible.builtin.debug:
+    var: kuma_provision.stdout_lines
+  when: not ansible_check_mode
+
+- name: Provision - skipped in check mode
+  ansible.builtin.debug:
+    msg: "Skipped in --check mode. Dry run on a running server: {{ kuma_venv }}/bin/python -I {{ files_dir }}/kuma/provision_kuma.py --check --url http://<service-ip>:3001 --config {{ config_file }}"
+  when: ansible_check_mode

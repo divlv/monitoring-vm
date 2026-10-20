@@ -1,0 +1,64 @@
+# Private config for the Monitoring VM - SAMPLE with made-up data.
+#
+# Copy this file to /etc/monitoring-vm/config.yml on the server (root:root, 0600),
+# replace every CHANGE_ME value and put in your real Targets. The real file must
+# NEVER be committed: this repository is public. (Locally name it config.local.yml,
+# it is git-ignored.)
+#
+# run_ansible.sh refuses to run while any value still contains CHANGE_ME.
+
+# Public host name of the Kuma UI. Its DNS A record must already point to this server,
+# because Traefik gets the HTTPS certificate with the Let's Encrypt HTTP-01 challenge.
+domain: status.example.com
+
+# Let's Encrypt contact e-mail.
+acme_email: CHANGE_ME@example.com
+
+# true  = Let's Encrypt STAGING certificates (untrusted by browsers, no rate limits): use for the first runs.
+# false = production certificates.
+acme_use_staging: true
+
+# Source addresses allowed to reach SSH (22) and ping; everything else NEW is dropped
+# except tcp 80/443. IPv4/IPv6, optional CIDR. run_ansible.sh refuses to enable the
+# firewall when this list is empty or does not contain the IP of your SSH session.
+trusted_ips:
+  - CHANGE_ME   # e.g. 203.0.113.10 or 203.0.113.0/24 or 2001:db8::/48
+
+# Kuma administrator. Kuma login is enabled (the UI is public). Min 16 characters.
+kuma:
+  admin_user: admin
+  admin_password: CHANGE_ME
+
+# Alert channel (both Groups alert to Telegram only).
+telegram:
+  bot_token: CHANGE_ME
+  chat_id: CHANGE_ME
+
+# Optional; these are the values migrated from the old Monit setup (30 s cycle,
+# DOWN after 2 failed checks, alert repeated every 2500 checks).
+monitoring:
+  interval: 30         # seconds between checks
+  retry_interval: 30   # seconds between retries after a failed check
+  retries: 1           # failed checks tolerated before DOWN (Monit: "for 2 cycles")
+  resend_interval: 2500  # repeat the DOWN alert every N checks
+  timeout: 15          # seconds
+
+# Groups of Targets. A Target is UP when HTTP status is 2xx and its response
+# contains the Health marker (plain, case-sensitive substring; Kuma has no regex here).
+groups:
+  - name: MyMonit
+    targets:
+      - name: Example site
+        url: https://www.example.com
+        marker: "#GTO"
+      - name: Example app
+        url: https://app.example.com/health
+        marker: "Main.nocache.js"
+  - name: ICFMonit
+    targets:
+      - name: Example analytics
+        url: https://analytics.example.com/login
+        marker: "Plausible"
+      # - name: Disabled until confirmed reachable from the internet
+      #   url: https://internal.example.com/status
+      #   marker: "OK"

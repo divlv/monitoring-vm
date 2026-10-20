@@ -1,0 +1,93 @@
+# Tuning for a 1 GB RAM / 1 vCPU server.
+
+# --- Swap file -------------------------------------------------------------------------
+
+- name: Swap - create {{ swap_file }} ({{ swap_size_mb }} MB)
+  ansible.builtin.command: "fallocate -l {{ swap_size_mb }}M {{ swap_file }}"
+  args:
+    creates: "{{ swap_file }}"
+
+- name: Swap - permissions (mkswap/swapon insist on root only)
+  ansible.builtin.file:
+    path: "{{ swap_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: not ansible_check_mode
+
+- name: Swap - is it already formatted?
+  ansible.builtin.command: "blkid -p -o value -s TYPE {{ swap_file }}"
+  register: swap_signature
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Swap - format
+  ansible.builtin.command: "mkswap {{ swap_file }}"
+  when: not ansible_check_mode and swap_signature.stdout != 'swap'
+
+- name: Swap - /etc/fstab entry
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '^{{ swap_file }}\s'
+    line: "{{ swap_file }} none swap sw 0 0"
+
+- name: Swap - what is active now?
+  ansible.builtin.command: swapon --noheadings --show=NAME
+  register: swap_active
+  changed_when: false
+  check_mode: false
+
+- name: Swap - activate
+  ansible.builtin.command: "swapon {{ swap_file }}"
+  when: not ansible_check_mode and swap_file not in swap_active.stdout_lines
+
+# --- Kernel and journald ---------------------------------------------------------------
+
+- name: Sysctl - swappiness={{ swappiness }}
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-monitoring-vm.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (monitoring-vm)
+      vm.swappiness = {{ swappiness }}
+  notify: apply sysctl
+
+- name: Journald - directory for the drop-in
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Journald - limit the journal to {{ journald_max_use }}
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/99-monitoring-vm.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (monitoring-vm)
+      [Journal]
+      SystemMaxUse={{ journald_max_use }}
+  notify: restart journald
+
+# --- snapd off ---------------------------------------------------------------------------
+
+- name: Snapd - is it installed?
+  ansible.builtin.command: systemctl list-unit-files snapd.service --no-legend
+  register: snapd_units
+  changed_when: false
+  check_mode: false
+
+- name: Snapd - stop and mask it (frees RAM, nothing here needs snaps)
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    masked: true
+  loop:
+    - snapd.socket
+    - snapd.service
+    - snapd.seeded.service
+  when: "'snapd.service' in snapd_units.stdout"

@@ -3,6 +3,15 @@
 .*l*u*e/
 *L*U*E.md
 
+
+# Sample files and directories to ignore
+sample/
+
+# Private config with the real Targets, domain and credentials (never commit!)
+config.yml
+*.local.yml
+
+
 ### Logs
 *.log
 

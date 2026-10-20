@@ -1,0 +1,20 @@
+- name: Report - is a reboot pending?
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: reboot_required
+
+- name: Report - REBOOT NEEDED (this run never reboots on its own)
+  ansible.builtin.debug:
+    msg: >-
+      A reboot is required (/var/run/reboot-required exists). Run "reboot" when convenient;
+      K3s, Kuma and the firewall (via autoexec.bat) come back up on their own.
+  when: reboot_required.stat.exists
+
+- name: Report - summary
+  ansible.builtin.debug:
+    msg:
+      - "RunId {{ run_id }} finished."
+      - "Kuma UI: https://{{ cfg.domain }} (log in as {{ cfg.kuma.admin_user }}; password: see the Private config)."
+      - "Let's Encrypt resolver in use: {{ acme_resolver }}{{ ' (STAGING certificate - browsers will warn; set acme_use_staging: false and re-run for a trusted one)' if acme_resolver == 'staging' else '' }}."
+      - "Check on the server: k3s kubectl get pods -A ; resolvectl status ; iptables -t mangle -S MVM_PRE ; iptables -S MVM_IN"
+      - "Logs: {{ log_dir }}/ (run_*.log, kuma_provision_*.log, firewall.log)"

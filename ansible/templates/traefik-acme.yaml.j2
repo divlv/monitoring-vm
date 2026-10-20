@@ -1,0 +1,31 @@
+# {{ ansible_managed }}
+#
+# Volume where Traefik keeps its ACME certificates ({{ traefik_data_dir }} on this server,
+# owned by Traefik's uid {{ traefik_uid }}). Same PV + PVC pair as in the arck3s sample;
+# "existingClaim: traefik" in the HelmChartConfig points to this claim.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: traefik-acme-pv
+spec:
+  capacity:
+    storage: 128Mi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: {{ traefik_data_dir }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 128Mi
+  storageClassName: "" # <<< This is important to set to empty string
+  volumeName: traefik-acme-pv

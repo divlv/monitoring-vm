@@ -1,0 +1,75 @@
+# Non-secret defaults. Everything private (domain, Targets, credentials, Trusted IPs)
+# lives in the Private config (config_file), which is loaded into the "cfg" variable.
+
+# Overridden by run_ansible.sh (-e run_id=..., config_file=..., ssh_client_ip=..., log_dir=...)
+run_id: "manual"
+config_file: /etc/monitoring-vm/config.yml
+ssh_client_ip: ""
+log_dir: /var/log/monitoring-vm
+
+# Ansible only looks for files/ and templates/ next to the playbooks (or in roles),
+# ours sit one level up (arck3s layout).
+files_dir: "{{ playbook_dir }}/../files"
+templates_dir: "{{ playbook_dir }}/../templates"
+
+# Set to true (-e allow_other_os=true) to skip the "Ubuntu 26.04 only" check.
+allow_other_os: false
+
+# Source address or CIDR, IPv4 or IPv6 (loose check; ipset validates it for real).
+ip_regex: '^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9A-Fa-f:]+(/[0-9]{1,3})?)$'
+
+# --- Base system ---------------------------------------------------------------------
+timezone: Europe/Riga
+
+# "dnsutils" is only a virtual package on Ubuntu 26.04 - the real one is bind9-dnsutils.
+# software-properties-common (add-apt-repository) and python3-venv (Kuma provisioning venv)
+# are needed by this configuration itself.
+base_packages:
+  - mc
+  - ncdu
+  - htop
+  - psmisc
+  - zip
+  - unzip
+  - ipset
+  - netcat-openbsd
+  - bind9-dnsutils
+  - bash-completion
+  - ioping
+  - git
+  - curl
+  - net-tools
+  - software-properties-common
+  - python3-venv
+  - python3-yaml
+
+google_dns:
+  - 8.8.8.8
+  - 8.8.4.4
+dns_check_host: archive.ubuntu.com
+
+# --- 1 GB RAM tuning -----------------------------------------------------------------
+swap_file: /swapfile
+swap_size_mb: 1024
+swappiness: 10
+journald_max_use: 100M
+
+# --- K3s -----------------------------------------------------------------------------
+# Pinned: bump deliberately. Stable channel on 2026-10-20 (Kubernetes v1.36.5).
+k3s_version: "v1.36.5+k3s1"
+k3s_manifests_dir: /var/lib/rancher/k3s/server/manifests
+# Traefik runs as uid/gid 65532, so the ACME volume must belong to it.
+traefik_data_dir: /opt/traefik-data
+traefik_uid: 65532
+
+# --- Uptime Kuma ---------------------------------------------------------------------
+kuma_image: louislam/uptime-kuma:2.5.6-slim
+kuma_namespace: uptime-kuma
+kuma_data_dir: /opt/kuma-data
+kuma_memory_request: 128Mi
+kuma_memory_limit: 384Mi
+
+# Python venv with the Kuma socket.io API client (supports Kuma up to 2.5.0 officially;
+# 2.5.6 is UNVERIFIED - check the provisioning output on the first run).
+kuma_venv: /opt/monitoring-vm-venv
+kuma_api_version: "2.9.0"

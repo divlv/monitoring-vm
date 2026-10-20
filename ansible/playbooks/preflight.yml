@@ -1,0 +1,139 @@
+- name: Preflight - show the run id
+  ansible.builtin.debug:
+    msg: "RunId: {{ run_id }}"
+
+- name: Preflight - must run as root
+  ansible.builtin.assert:
+    that: ansible_facts['user_id'] == 'root'
+    fail_msg: "Run this as root (use run_ansible.sh)."
+    quiet: true
+
+- name: Preflight - supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] == '26.04'
+    fail_msg: >-
+      This configuration targets Ubuntu 26.04, found
+      {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+      Use -e allow_other_os=true to skip this check at your own risk.
+    quiet: true
+  when: not allow_other_os
+
+# --- Private config ------------------------------------------------------------------
+
+- name: Preflight - private config exists
+  ansible.builtin.stat:
+    path: "{{ config_file }}"
+  register: cfg_stat
+
+- name: Preflight - private config must exist
+  ansible.builtin.assert:
+    that: cfg_stat.stat.exists
+    fail_msg: >-
+      {{ config_file }} not found. Copy config.sample.yml there and fill in your real values.
+    quiet: true
+
+- name: Preflight - private config directory is root only
+  ansible.builtin.file:
+    path: "{{ config_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Preflight - private config file is root only
+  ansible.builtin.file:
+    path: "{{ config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Preflight - load the private config
+  ansible.builtin.include_vars:
+    file: "{{ config_file }}"
+    name: cfg
+  no_log: true
+
+- name: Preflight - required keys are present
+  ansible.builtin.assert:
+    that:
+      - cfg is mapping
+      - cfg.domain is defined
+      - cfg.acme_email is defined
+      - cfg.trusted_ips is defined
+      - cfg.kuma is defined and cfg.kuma.admin_user is defined and cfg.kuma.admin_password is defined
+      - cfg.telegram is defined and cfg.telegram.bot_token is defined and cfg.telegram.chat_id is defined
+      - cfg.groups is defined
+    fail_msg: >-
+      {{ config_file }} is incomplete. Required keys: domain, acme_email, trusted_ips,
+      kuma.admin_user, kuma.admin_password, telegram.bot_token, telegram.chat_id, groups.
+      See config.sample.yml.
+    quiet: true
+
+- name: Preflight - no placeholder values are left
+  ansible.builtin.assert:
+    that: "'CHANGE_ME' not in (cfg | to_json)"
+    fail_msg: "{{ config_file }} still contains CHANGE_ME values. Replace every one of them."
+    quiet: true
+
+- name: Preflight - values look sane
+  ansible.builtin.assert:
+    that:
+      - cfg.domain is match('^[A-Za-z0-9.-]+[.][A-Za-z]{2,}$')
+      - cfg.acme_email is match('^[^@ ]+@[^@ ]+[.][^@ ]+$')
+      - cfg.kuma.admin_password | string | length >= 16
+      - cfg.groups | length > 0
+    fail_msg: >-
+      {{ config_file }}: domain must be a host name, acme_email an e-mail address,
+      kuma.admin_password at least 16 characters, groups a non-empty list.
+    quiet: true
+
+- name: Preflight - Trusted IPs are a non-empty list of addresses
+  ansible.builtin.assert:
+    that:
+      - cfg.trusted_ips is sequence and cfg.trusted_ips is not string
+      - cfg.trusted_ips | length > 0
+      - cfg.trusted_ips | map('string') | reject('match', ip_regex) | list | length == 0
+    fail_msg: >-
+      trusted_ips must be a non-empty list of IPv4/IPv6 addresses or CIDRs
+      (the firewall would lock you out otherwise).
+    quiet: true
+
+- name: Preflight - every Target has a name, an http(s) URL and a Health marker
+  ansible.builtin.assert:
+    that:
+      - cfg.groups | selectattr('name', 'undefined') | list | length == 0
+      - cfg.groups | selectattr('targets', 'undefined') | list | length == 0
+      - cfg.groups | map(attribute='targets') | flatten | selectattr('name', 'undefined') | list | length == 0
+      - cfg.groups | map(attribute='targets') | flatten | selectattr('url', 'undefined') | list | length == 0
+      - cfg.groups | map(attribute='targets') | flatten | selectattr('marker', 'undefined') | list | length == 0
+      - cfg.groups | map(attribute='targets') | flatten | map(attribute='url') | reject('match', '^https?://') | list | length == 0
+    fail_msg: "Every group needs a name and targets; every target needs name, url (http/https) and marker."
+    quiet: true
+
+- name: Preflight - pick the Let's Encrypt resolver
+  ansible.builtin.set_fact:
+    acme_resolver: "{{ 'staging' if (cfg.acme_use_staging | default(true) | bool) else 'prod' }}"
+
+# --- Domain ----------------------------------------------------------------------------
+
+- name: Preflight - resolve the UI domain
+  ansible.builtin.command: "getent ahostsv4 {{ cfg.domain }}"
+  register: domain_lookup
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preflight - warn when the UI domain does not point to this server
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ cfg.domain }} resolves to
+      {{ domain_lookup.stdout_lines | map('split') | map('first') | unique | list }},
+      none of which is an address of this server
+      ({{ ansible_facts['all_ipv4_addresses'] }}). The Let's Encrypt HTTP-01 challenge
+      will fail unless the record points here (a reserved/floating IP is fine).
+  when: >-
+    domain_lookup.rc != 0 or
+    (domain_lookup.stdout_lines | map('split') | map('first') | unique | list
+     | intersect(ansible_facts['all_ipv4_addresses']) | length == 0)

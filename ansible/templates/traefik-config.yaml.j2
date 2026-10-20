@@ -1,0 +1,38 @@
+# {{ ansible_managed }}
+#
+# Traefik (bundled with K3s) with Let's Encrypt certificates over the HTTP-01 challenge,
+# exactly the approach of the arck3s sample. Two resolvers exist ("staging" and "prod");
+# the Kuma ingress picks one (config key acme_use_staging).
+# HelmChartConfig values are merged over the ones K3s ships (no need to touch image/tag).
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik # must match the HelmChart name
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    persistence:
+      enabled: true
+      existingClaim: traefik
+      accessMode: ReadWriteOnce
+      size: 128Mi
+      path: /data
+
+    additionalArguments:
+      - "--certificatesresolvers.prod.acme.email={{ cfg.acme_email }}"
+      - "--certificatesresolvers.prod.acme.storage=/data/acme_prod.json"
+      - "--certificatesresolvers.prod.acme.httpChallenge.entrypoint=web"
+      - "--certificatesresolvers.prod.acme.caserver=https://acme-v02.api.letsencrypt.org/directory"
+      - "--certificatesresolvers.staging.acme.email={{ cfg.acme_email }}"
+      - "--certificatesresolvers.staging.acme.storage=/data/acme_staging.json"
+      - "--certificatesresolvers.staging.acme.httpChallenge.entrypoint=web"
+      - "--certificatesresolvers.staging.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+
+    ports:
+      web:
+        http:
+          redirections:
+            entryPoint:
+              to: websecure
+              scheme: https
+              permanent: true

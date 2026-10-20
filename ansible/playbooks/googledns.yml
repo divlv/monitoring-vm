@@ -1,0 +1,128 @@
+# Google DNS on Ubuntu 26.04 (systemd-resolved, no resolvconf).
+#
+# DigitalOcean configures its own resolvers per network interface (netplan -> networkd),
+# and a global resolved.conf DNS= alone would be queried IN ADDITION to them. So besides
+# the global drop-in, every netplan-generated .network unit gets a drop-in that first
+# RESETS its DNS list (empty "DNS=") and then sets Google DNS. The drop-ins live in
+# /etc/systemd/network, so cloud-init/netplan regenerating /run/... does not undo them.
+# After applying, the resolver is tested; on failure everything is rolled back.
+- name: Google DNS
+  block:
+    - name: Google DNS - global systemd-resolved drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Google DNS - global systemd-resolved drop-in
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/resolved-google-dns.conf.j2"
+        dest: /etc/systemd/resolved.conf.d/90-monitoring-vm-google-dns.conf
+        mode: "0644"
+      register: dns_global
+
+    - name: Google DNS - find the netplan-generated networkd units
+      ansible.builtin.find:
+        paths: /run/systemd/network
+        patterns: "10-netplan-*.network"
+      register: netplan_units
+      check_mode: false
+
+    - name: Google DNS - drop-in directory for each network unit
+      ansible.builtin.file:
+        path: "/etc/systemd/network/{{ item.path | basename }}.d"
+        state: directory
+        mode: "0755"
+      loop: "{{ netplan_units.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Google DNS - per-interface drop-in (resets the provider DNS list)
+      ansible.builtin.template:
+        src: "{{ templates_dir }}/networkd-google-dns.conf.j2"
+        dest: "/etc/systemd/network/{{ item.path | basename }}.d/90-monitoring-vm-google-dns.conf"
+        mode: "0644"
+      loop: "{{ netplan_units.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      register: dns_links
+
+    - name: Google DNS - warn when no netplan unit was found
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: no /run/systemd/network/10-netplan-*.network found; only the global
+          resolved drop-in was written, so provider DNS servers may still be queried too.
+      when: netplan_units.files | length == 0
+
+    - name: Google DNS - apply the new network configuration
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - networkctl reload
+        - systemctl restart systemd-resolved
+      when: >-
+        not ansible_check_mode and
+        (dns_global.changed or (dns_links.results | selectattr('changed') | list | length > 0))
+      changed_when: true
+
+    - name: Google DNS - re-apply every physical interface
+      ansible.builtin.command: "networkctl reconfigure {{ item }}"
+      loop: "{{ ansible_facts['interfaces'] | select('match', '^(eth|ens|enp)[0-9a-z]*$') | list }}"
+      when: >-
+        not ansible_check_mode and
+        (dns_global.changed or (dns_links.results | selectattr('changed') | list | length > 0))
+      changed_when: true
+
+    - name: Google DNS - a name must resolve through the new setup
+      ansible.builtin.command: "getent hosts {{ dns_check_host }}"
+      register: dns_verify
+      retries: 5
+      delay: 3
+      until: dns_verify.rc == 0
+      changed_when: false
+      check_mode: false
+
+    - name: Google DNS - show the resolver state
+      ansible.builtin.command: resolvectl status
+      register: dns_status
+      changed_when: false
+      check_mode: false
+
+    - name: Google DNS - Google servers are in use
+      ansible.builtin.assert:
+        that: "google_dns[0] in dns_status.stdout"
+        fail_msg: "resolvectl status does not list {{ google_dns[0] }}."
+        quiet: true
+      when: not ansible_check_mode
+
+    - name: Google DNS - resolver state (for the log)
+      ansible.builtin.debug:
+        var: dns_status.stdout_lines
+
+  rescue:
+    - name: Google DNS ROLLBACK - remove the global drop-in
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d/90-monitoring-vm-google-dns.conf
+        state: absent
+
+    - name: Google DNS ROLLBACK - remove the per-interface drop-ins
+      ansible.builtin.file:
+        path: "/etc/systemd/network/{{ item.path | basename }}.d/90-monitoring-vm-google-dns.conf"
+        state: absent
+      loop: "{{ (netplan_units | default({'files': []})).files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Google DNS ROLLBACK - reload networkd and restart the resolver
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - networkctl reload
+        - systemctl restart systemd-resolved
+      changed_when: true
+      failed_when: false
+
+    - name: Google DNS ROLLBACK - report
+      ansible.builtin.fail:
+        msg: >-
+          Google DNS did not work ({{ dns_check_host }} did not resolve or the servers are not
+          listed in resolvectl status). The drop-ins were removed again and the previous DNS
+          configuration restored. Check "resolvectl status" and the DigitalOcean network setup.

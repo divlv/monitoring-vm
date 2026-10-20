@@ -1,0 +1,122 @@
+- name: Base - log directory
+  ansible.builtin.file:
+    path: "{{ log_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# --- Timezone --------------------------------------------------------------------------
+
+- name: Timezone - read the current one
+  ansible.builtin.command: timedatectl show --property=Timezone --value
+  register: tz_current
+  changed_when: false
+  check_mode: false
+
+- name: Timezone - set {{ timezone }}
+  ansible.builtin.command: "timedatectl set-timezone {{ timezone }}"
+  when: tz_current.stdout != timezone
+
+# --- Packages --------------------------------------------------------------------------
+
+- name: Packages - tool that manages apt repositories
+  ansible.builtin.apt:
+    name: software-properties-common
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Packages - is the 'universe' component enabled? (mc, ncdu, ioping live there)
+  ansible.builtin.command: apt-cache policy mc
+  register: apt_policy_mc
+  changed_when: false
+  check_mode: false
+
+- name: Packages - enable 'universe'
+  ansible.builtin.command: add-apt-repository -y universe
+  when: "'Candidate:' not in apt_policy_mc.stdout or 'Candidate: (none)' in apt_policy_mc.stdout"
+
+- name: Packages - install the base set
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# --- Aliases (/root/.bash_aliases, made safe to re-run: no "echo >>") --------------------
+
+- name: Aliases - /root/.bash_aliases
+  ansible.builtin.blockinfile:
+    path: /root/.bash_aliases
+    create: true
+    mode: "0644"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK monitoring-vm aliases"
+    block: |
+      alias getsize='du -a -h --max-depth=1'
+      alias ffind='find / -name '
+      alias ports='netstat -anltpu | grep -E "udp|LISTEN"'
+      alias portsa='netstat -anltp'
+      alias iptl='iptables -nv -L'
+      alias checkport='nc -w5 -z -v '
+      alias myip='dig +short myip.opendns.com @resolver1.opendns.com'
+
+- name: Aliases - make sure .bashrc loads them
+  ansible.builtin.blockinfile:
+    path: /root/.bashrc
+    create: true
+    mode: "0644"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK monitoring-vm load aliases"
+    block: |
+      if [ -f ~/.bash_aliases ]; then
+          . ~/.bash_aliases
+      fi
+
+# --- autoexec.bat (started by cron on every reboot) ------------------------------------
+
+- name: Autoexec.bat - copy to /root
+  ansible.builtin.copy:
+    src: "{{ files_dir }}/root/autoexec.bat"
+    dest: /root/autoexec.bat
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Autoexec.bat - cron @reboot
+  ansible.builtin.cron:
+    name: "autoexec.bat"
+    special_time: reboot
+    job: "/root/autoexec.bat"
+
+- name: Autoexec.bat - close the crontab properly
+  ansible.builtin.cron:
+    name: "fake_job_closer"
+    minute: "28"
+    hour: "5"
+    job: "date > /dev/null"
+
+# --- Security updates only, never an automatic reboot ----------------------------------
+
+- name: Updates - unattended-upgrades is installed
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+
+- name: Updates - run daily (the default origins of Ubuntu are the security pocket)
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Updates - never reboot automatically
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52monitoring-vm-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Unattended-Upgrade::Automatic-Reboot "false";

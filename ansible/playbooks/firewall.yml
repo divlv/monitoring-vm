@@ -1,0 +1,38 @@
+# Host firewall (iptables + ipset), see files/root/iptables.sh and docs/adr/0002.
+# Applied last. The script refuses to touch any rule when the IP of this SSH session
+# is not in "trusted_ips" (lockout protection) and is run again on every boot by
+# /root/autoexec.bat (cron @reboot).
+
+- name: Firewall - Trusted IPs file (read by iptables.sh, also at boot)
+  ansible.builtin.copy:
+    dest: /etc/monitoring-vm/trusted_ips
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      # Managed by Ansible from the Private config. One address or CIDR per line.
+      {{ cfg.trusted_ips | join('\n') }}
+  no_log: true
+
+- name: Firewall - script
+  ansible.builtin.copy:
+    src: "{{ files_dir }}/root/iptables.sh"
+    dest: /root/iptables.sh
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Firewall - apply (aborts without touching anything if your SSH IP is not trusted)
+  ansible.builtin.command: /root/iptables.sh
+  environment:
+    RUN_ID: "{{ run_id }}"
+    SSH_CLIENT_IP: "{{ ssh_client_ip }}"
+  register: firewall_apply
+  # Re-applying identical rules is a no-op for the system, so it is never reported as "changed".
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Firewall - rules now in place
+  ansible.builtin.debug:
+    var: firewall_apply.stdout_lines
+  when: not ansible_check_mode

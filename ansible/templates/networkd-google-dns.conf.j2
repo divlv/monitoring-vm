@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# The empty "DNS=" first clears the DNS servers the provider put into this interface.
+[Network]
+DNS=
+{% for ns in google_dns %}
+DNS={{ ns }}
+{% endfor %}

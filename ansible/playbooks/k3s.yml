@@ -1,0 +1,93 @@
+# Single-node K3s with its bundled Traefik (ingress + HTTPS) - the same approach as the
+# arck3s sample. config.yaml and all manifests are written BEFORE K3s is installed and
+# started, so the first start already picks them up.
+
+- name: K3s - was it installed before this run?
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_bin
+
+- name: K3s - installed version
+  ansible.builtin.command: k3s --version
+  register: k3s_ver
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: k3s_bin.stat.exists
+
+- name: K3s - directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/rancher/k3s, mode: "0755" }
+    - { path: "{{ k3s_manifests_dir }}", mode: "0755" }
+    # ACME certificates; Traefik runs as 65532 and creates acme_*.json (0600) here.
+    - { path: "{{ traefik_data_dir }}", mode: "0700", owner: "{{ traefik_uid }}", group: "{{ traefik_uid }}" }
+    - { path: "{{ kuma_data_dir }}", mode: "0755" }
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: K3s - /etc/rancher/k3s/config.yaml
+  ansible.builtin.template:
+    src: "{{ templates_dir }}/k3s-config.yaml.j2"
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  register: k3s_config
+
+# K3s watches this directory and (re)applies a file whenever it changes.
+- name: K3s - manifests (Traefik config, ACME volume, Uptime Kuma)
+  ansible.builtin.template:
+    src: "{{ templates_dir }}/{{ item }}.j2"
+    dest: "{{ k3s_manifests_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - traefik-config.yaml
+    - traefik-acme.yaml
+    - uptime-kuma.yaml
+
+- name: K3s - download the installer
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /usr/local/share/k3s-install.sh
+    owner: root
+    group: root
+    mode: "0755"
+  when: not k3s_bin.stat.exists or k3s_version not in (k3s_ver.stdout | default(''))
+
+- name: K3s - install or move to the pinned version {{ k3s_version }}
+  ansible.builtin.command: /usr/local/share/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  when: not k3s_bin.stat.exists or k3s_version not in (k3s_ver.stdout | default(''))
+
+- name: K3s - restart to pick up a changed config.yaml
+  ansible.builtin.systemd_service:
+    name: k3s
+    state: restarted
+  when: k3s_config.changed and k3s_bin.stat.exists and not ansible_check_mode
+
+- name: K3s - wait for the node to be Ready
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=60s
+  register: k3s_node_ready
+  retries: 20
+  delay: 10
+  until: k3s_node_ready.rc == 0
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: K3s - wait for Traefik (installed by the helm controller)
+  ansible.builtin.command: k3s kubectl -n kube-system rollout status deployment/traefik --timeout=60s
+  register: traefik_ready
+  retries: 30
+  delay: 10
+  until: traefik_ready.rc == 0
+  changed_when: false
+  when: not ansible_check_mode

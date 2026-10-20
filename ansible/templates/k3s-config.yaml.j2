@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# K3s server configuration (the datastore is the default embedded SQLite).
+write-kubeconfig-mode: "0600"
+
+# Saves RAM on a 1 GB server. Kept: Traefik (ingress/HTTPS), CoreDNS, ServiceLB,
+# local-path provisioner and the helm controller (Traefik is configured through it).
+disable:
+  - metrics-server

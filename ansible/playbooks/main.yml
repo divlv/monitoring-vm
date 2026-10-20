@@ -1,0 +1,52 @@
+---
+# Monitoring VM: one play, executed locally on the server by run_ansible.sh.
+# Run only a part with tags, e.g.: run_ansible.sh --tags k3s,kuma
+# (the "preflight" and "report" steps always run: they load the Private config).
+- name: Monitoring VM - configure this server
+  hosts: app
+  gather_facts: true
+
+  # Loaded explicitly: Ansible only auto-loads group_vars/ that sit next to the
+  # inventory file or the playbook, and ours is one level up. Extra vars (-e) still win.
+  vars_files:
+    - ../group_vars/all.yml
+
+  handlers:
+    - name: Apply sysctl settings
+      ansible.builtin.command: sysctl --system
+      listen: apply sysctl
+
+    - name: Restart journald
+      ansible.builtin.systemd_service:
+        name: systemd-journald
+        state: restarted
+      listen: restart journald
+
+  tasks:
+    - ansible.builtin.import_tasks: preflight.yml
+      tags: [always]
+
+    - ansible.builtin.import_tasks: googledns.yml
+      tags: [dns]
+
+    - ansible.builtin.import_tasks: base.yml
+      tags: [base]
+
+    - ansible.builtin.import_tasks: systemtune.yml
+      tags: [tune]
+
+    - ansible.builtin.import_tasks: k3s.yml
+      tags: [k3s]
+
+    - ansible.builtin.import_tasks: kuma.yml
+      tags: [kuma]
+
+    - ansible.builtin.import_tasks: provision.yml
+      tags: [provision]
+
+    # Last on purpose: a wrong firewall must not break the steps above.
+    - ansible.builtin.import_tasks: firewall.yml
+      tags: [firewall]
+
+    - ansible.builtin.import_tasks: report.yml
+      tags: [always]

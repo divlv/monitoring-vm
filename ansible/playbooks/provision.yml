@@ -18,22 +18,41 @@
   when: not ansible_check_mode
 
 - name: Provision - Kuma Groups, Targets and alert channel
-  ansible.builtin.command:
-    argv:
-      - "{{ kuma_venv }}/bin/python"
-      - -I
-      - "{{ files_dir }}/kuma/provision_kuma.py"
-      - --url
-      - "http://{{ kuma_cluster_ip.stdout }}:3001"
-      - --config
-      - "{{ config_file }}"
-      - --run-id
-      - "{{ run_id }}"
-      - --log-file
-      - "{{ log_dir }}/kuma_provision_{{ run_id }}.log"
-  register: kuma_provision
-  changed_when: "'RESULT changed=0 ' not in kuma_provision.stdout"
   when: not ansible_check_mode
+  block:
+    - name: Provision - run the script
+      ansible.builtin.command:
+        argv:
+          - "{{ kuma_venv }}/bin/python"
+          - -I
+          - "{{ files_dir }}/kuma/provision_kuma.py"
+          - --url
+          - "http://{{ kuma_cluster_ip.stdout }}:3001"
+          - --config
+          - "{{ config_file }}"
+          - --run-id
+          - "{{ run_id }}"
+          - --log-file
+          - "{{ log_dir }}/kuma_provision_{{ run_id }}.log"
+      register: kuma_provision
+      changed_when: "'RESULT changed=0 ' not in kuma_provision.stdout"
+  rescue:
+    - name: Provision - the script failed, collect diagnostics
+      ansible.builtin.include_tasks: diagnostics.yml
+
+    - name: Provision - tail of the script's own DEBUG log (secrets are masked in it)
+      ansible.builtin.shell: "tail -n 40 {{ log_dir }}/kuma_provision_{{ run_id }}.log | cut -c1-400"
+      register: kuma_provision_log
+      changed_when: false
+      failed_when: false
+
+    - name: Provision - show the log tail
+      ansible.builtin.debug:
+        var: kuma_provision_log.stdout_lines
+
+    - name: Provision - failed
+      ansible.builtin.fail:
+        msg: "provision_kuma.py failed, see its output, the log tail and the diagnostics above."
 
 - name: Provision - result
   ansible.builtin.debug:

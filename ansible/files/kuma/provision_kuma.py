@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import yaml
-from uptime_kuma_api import MonitorType, NotificationType, UptimeKumaApi, UptimeKumaException
+from uptime_kuma_api import MonitorType, NotificationType, Timeout, UptimeKumaApi, UptimeKumaException
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -376,11 +376,45 @@ class Provisioner:
         LOG.debug("API request: %s %s", name, json.dumps(request, default=str, ensure_ascii=False))
         try:
             response = method(*args, **kwargs)
-        except Exception:
-            LOG.error("API call %s failed", name)
+        except Exception as exc:
+            LOG.error("API call %s failed: %s %s", name, type(exc).__name__, exc)
             raise
         LOG.debug("API response: %s %s", name, json.dumps(mask_sensitive(response), default=str, ensure_ascii=False))
         return response
+
+    def _call_with_retry(self, method: Any, /, *args: Any, attempts: int = 3, **kwargs: Any) -> Any:
+        """Like :meth:`_call` for a harmless read, repeated when the answer never comes.
+
+        Args:
+            method: The API method to call.
+            *args: Positional arguments for it.
+            attempts: How many times to try before the Timeout is passed on.
+            **kwargs: Keyword arguments for it.
+
+        Raises:
+            Timeout: If every attempt timed out.
+        """
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._call(method, *args, **kwargs)
+            except Timeout:
+                if attempt == attempts:
+                    raise
+                LOG.warning("%s got no answer (attempt %d/%d), trying again", method.__name__, attempt, attempts)
+
+    def wait_for_server(self) -> None:
+        """Wait until Kuma has really finished greeting this client.
+
+        Kuma 2.x runs ``await sendInfo(socket)`` first in its connection handler and only
+        THEN registers the handlers for ``needSetup``, ``login`` and the rest (server.js).
+        The API client connects and calls ``needSetup`` at once; on a slow server that call
+        arrives before its handler exists and Socket.IO drops it silently, so it is never
+        answered (first server run: 30 s Timeout). The ``info`` event is emitted by that
+        very ``sendInfo``, so once it has arrived the handlers are about to be registered.
+        """
+        info = self._call(self.api.info)
+        LOG.info("Kuma server is up, version %s", info.get("version", "unknown"))
+        time.sleep(1.0)  # the handlers are registered right after the event is sent
 
     def _write(self, description: str, counter: str) -> bool:
         """Count a planned change and say whether it must really be executed."""
@@ -402,7 +436,7 @@ class Provisioner:
             ProvisionError: If Kuma refuses the setup or the login.
         """
         user = self.cfg.admin_user
-        if self._call(self.api.need_setup):
+        if self._call_with_retry(self.api.need_setup):
             if not self._write(f"create the Kuma administrator '{user}' (first start)", "created"):
                 LOG.info("[check] Kuma is not set up yet, so Groups and Targets cannot be inspected")
                 return False
@@ -550,6 +584,7 @@ class Provisioner:
 
     def run(self) -> None:
         """Apply everything, in dependency order."""
+        self.wait_for_server()
         if not self.login():
             return
         self.ensure_settings()
@@ -575,7 +610,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-file", help="also write DEBUG logs (full API bodies, secrets masked) here")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="console log level (default INFO)")
-    parser.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for each API answer")
+    parser.add_argument("--timeout", type=float, default=20.0, help="seconds to wait for each API answer (default 20)")
     parser.add_argument("--check", action="store_true", help="dry run: log what would change, write nothing")
     return parser.parse_args(argv)
 
@@ -607,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
             provisioner = Provisioner(api, config, args.check)
             provisioner.run()
     except (ProvisionError, UptimeKumaException) as exc:
-        LOG.error("%s", exc)
+        LOG.error("%s: %s", type(exc).__name__, exc)  # a Timeout has an empty message
         return EXIT_FAILURE
     except Exception:
         LOG.exception("Unexpected failure")
@@ -623,4 +658,4 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-# code-documentation-2026-10-20T17:10:43+03:00
+# code-documentation-2026-10-20T18:29:52+03:00

@@ -78,6 +78,9 @@ COMPARED_FIELDS = (
 
 SENSITIVE_KEY_PARTS = ("password", "token", "secret", "authorization", "webhook")
 
+# Seconds to let Kuma finish its connection greeting before the first call (see Provisioner.let_server_greet).
+GREETING_DELAY = 2.0
+
 
 class ConfigError(Exception):
     """The Private config is missing, unreadable or invalid."""
@@ -382,39 +385,50 @@ class Provisioner:
         LOG.debug("API response: %s %s", name, json.dumps(mask_sensitive(response), default=str, ensure_ascii=False))
         return response
 
-    def _call_with_retry(self, method: Any, /, *args: Any, attempts: int = 3, **kwargs: Any) -> Any:
+    def _call_with_retry(
+        self, method: Any, /, *args: Any, attempts: int = 5, attempt_timeout: float = 5.0, **kwargs: Any
+    ) -> Any:
         """Like :meth:`_call` for a harmless read, repeated when the answer never comes.
+
+        Each attempt waits only ``attempt_timeout`` seconds (instead of the client's long
+        default), so a dropped call costs seconds, not half a minute.
 
         Args:
             method: The API method to call.
             *args: Positional arguments for it.
             attempts: How many times to try before the Timeout is passed on.
+            attempt_timeout: Seconds to wait for the answer of each attempt.
             **kwargs: Keyword arguments for it.
 
         Raises:
             Timeout: If every attempt timed out.
         """
-        for attempt in range(1, attempts + 1):
-            try:
-                return self._call(method, *args, **kwargs)
-            except Timeout:
-                if attempt == attempts:
-                    raise
-                LOG.warning("%s got no answer (attempt %d/%d), trying again", method.__name__, attempt, attempts)
+        default_timeout = self.api.timeout
+        self.api.timeout = min(default_timeout, attempt_timeout)
+        try:
+            for attempt in range(1, attempts + 1):
+                try:
+                    return self._call(method, *args, **kwargs)
+                except Timeout:
+                    if attempt == attempts:
+                        raise
+                    LOG.warning("%s got no answer (attempt %d/%d), trying again", method.__name__, attempt, attempts)
+        finally:
+            self.api.timeout = default_timeout
 
-    def wait_for_server(self) -> None:
-        """Wait until Kuma has really finished greeting this client.
+    def let_server_greet(self) -> None:
+        """Give Kuma time to finish greeting this client before the first call.
 
         Kuma 2.x runs ``await sendInfo(socket)`` first in its connection handler and only
         THEN registers the handlers for ``needSetup``, ``login`` and the rest (server.js).
-        The API client connects and calls ``needSetup`` at once; on a slow server that call
-        arrives before its handler exists and Socket.IO drops it silently, so it is never
-        answered (first server run: 30 s Timeout). The ``info`` event is emitted by that
-        very ``sendInfo``, so once it has arrived the handlers are about to be registered.
+        The API client calls ``needSetup`` the moment it is connected; if that arrives
+        before the handler exists, Socket.IO drops it silently and it is never answered
+        (seen on the droplet: ``needSetup`` sent 8 ms before the server's ``info``/``setup``/
+        ``loginRequired`` events, then a 20-30 s Timeout). The pre-login ``info`` event has
+        no ``version`` and the client ignores it, so there is nothing to wait for; a short
+        pause plus the retries of :meth:`_call_with_retry` cover the gap.
         """
-        info = self._call(self.api.info)
-        LOG.info("Kuma server is up, version %s", info.get("version", "unknown"))
-        time.sleep(1.0)  # the handlers are registered right after the event is sent
+        time.sleep(GREETING_DELAY)
 
     def _write(self, description: str, counter: str) -> bool:
         """Count a planned change and say whether it must really be executed."""
@@ -452,6 +466,10 @@ class Provisioner:
                 "(or 2FA was switched on), make the config match or switch 2FA off for this account."
             ) from exc
         LOG.info("Logged in to Kuma as '%s'", user)
+        try:  # only informative: the version arrives with the first post-login info event
+            LOG.info("Kuma server version %s", self._call(self.api.info).get("version", "unknown"))
+        except Timeout:
+            LOG.warning("Kuma did not report its version (continuing)")
         return True
 
     def ensure_settings(self) -> None:
@@ -584,7 +602,7 @@ class Provisioner:
 
     def run(self) -> None:
         """Apply everything, in dependency order."""
-        self.wait_for_server()
+        self.let_server_greet()
         if not self.login():
             return
         self.ensure_settings()
@@ -658,4 +676,4 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-# code-documentation-2026-10-20T18:29:52+03:00
+# code-documentation-2026-10-20T18:43:26+03:00

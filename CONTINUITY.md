@@ -31,18 +31,19 @@
 
 ## Done
 - Grilling session (Q1-Q25) finished and user confirmed; code, ADRs, README written; static checks done.
-- Server `icfmonitor` is configured end to end EXCEPT the firewall step (held for the user's go): preflight, Google DNS (global + per-link, verified Google-only), base, 1 GB tuning, K3s v1.36.5+k3s1, Traefik (Let's Encrypt STAGING certificate issued for the UI domain over HTTP-01; http -> https 301), Kuma 2.5.6 pod, provisioning (RunId smb89hx: created=21 updated=1 = admin, settings, Telegram channel, 2 Groups, 17 Targets); a second dry run gives changed=0 (idempotent). Run 1 failed on a timeout (Traefik wait), runs 2-3 on a Kuma greeting race; both fixed (commits 517a752, f41180b, a67a2b3).
+- Server `icfmonitor` is configured end to end, firewall included (RunId 81802bs, applied after the user's go): preflight, Google DNS (global + per-link, verified Google-only), base, 1 GB tuning, K3s v1.36.5+k3s1, Traefik (Let's Encrypt STAGING certificate issued for the UI domain over HTTP-01; http -> https 301), Kuma 2.5.6 pod, provisioning (RunId smb89hx: created=21 updated=1 = admin, settings, Telegram channel, 2 Groups, 17 Targets); a second dry run gives changed=0 (idempotent). Run 1 failed on a timeout (Traefik wait), runs 2-3 on a Kuma greeting race; both fixed (commits 517a752, f41180b, a67a2b3).
 - Root cause of the provisioning failure (PROVEN with a verbose Socket.IO probe on the server): the client emits `needSetup` ~8 ms before Kuma finished `await sendInfo` and registered its handlers, so the call is dropped unanswered. The pre-login `info` event has no `version` and uptime-kuma-api2 ignores it, so waiting for `api.info()` can never work. Fix (a67a2b3) = 2 s pause + `need_setup` retries (5 x 5 s); the real dry run then answered on the first attempt.
 - SSH access for Claude: alias `icfmonitor-root` (dedicated key ~/.ssh/id_claude_icfmonitor, host key verified by fingerprint). Revoke: delete the config block + key files + the "claude-icfmonitor" line in /root/.ssh/authorized_keys.
 
 ## Now
 - Kuma monitors 17 Targets; its log shows 3 genuinely failing: the GWT-based MyMonit Target (HTTP 200 but marker `Main.nocache.js` not in the response body -> semantics of the old check_status.sh marker probably differ), a MyMonit demo Target (ECONNREFUSED on :443 from the new IP), the MyMonit Target on port 1080 (timeout; that port is probably restricted to trusted IPs). The new VM's public IP likely has to be allowed on those hosts' firewalls.
 - BLOCKER for alerts: Telegram answers HTTP 400 "Bad Request: chat not found" -> `telegram.chat_id` in the Private config is wrong, or the bot is not in that chat / was never started. The user must correct it (I do not read that file), then `run_ansible.sh --tags provision` updates the channel.
-- Waiting for the user: (1) go/no-go for the firewall step, (2) correct chat_id, (3) decision on the 3 failing Targets, (4) when satisfied set `acme_use_staging: false` in the Private config and re-run.
+- Firewall APPLIED and verified: a NEW SSH session works; INPUT policy DROP + MVM_IN, mangle MVM_PRE hooked on eth0/eth1, IPv4 + IPv6; 80/443 answer (http 301, https 302); cluster, DNS and outbound traffic fine; cron @reboot autoexec.bat present. Three transient DNS errors in Kuma right after it were machine load (0 in a quiet 2.5 min). Re-application at boot is NOT yet tested (no reboot done).
+- Waiting for the user: (1) correct chat_id, (2) decision on the 3 failing Targets, (3) later (user will do it): `acme_use_staging: false` in the Private config + re-run.
 - Server memory after provisioning: used ~395 MB, swap 618/1023 MB (stable).
 
 ## Next
-- Firewall: `ssh icfmonitor-root 'cd /opt/monitoring-vm && bash run_ansible.sh --tags firewall'` only after the user's OK (lockout check uses this machine's SSH IP, which the user says is in trusted_ips); verify with a NEW ssh session, `iptables -S MVM_IN`, `iptables -t mangle -S MVM_PRE`, 80/443 answering.
+- Optional, needs the user's OK: a reboot test to prove autoexec.bat re-applies the firewall at boot (and that K3s/Kuma come back on 1 GB). Note: every `k3s kubectl` call loads the strained 1 GB box (swap ~590/1023 MB) - keep diagnostics sparse.
 - After Telegram works: confirm one real alert arrives (a failing Target should notify).
 - Un-comment the 8 ICFMonit targets once reachable and give them literal markers. Possible follow-up: `--status` mode for provision_kuma.py (list Targets with last heartbeat).
 - Remind the user to remove the claude-icfmonitor key from /root/.ssh/authorized_keys when done.

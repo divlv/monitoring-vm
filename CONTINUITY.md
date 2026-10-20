@@ -27,29 +27,30 @@
 ## State
 - DONE and written: run_ansible.sh, config.sample.yml, config.local.yml (git-ignored), ansible/{ansible.cfg, inventory, group_vars, playbooks/{main,preflight,googledns,base,systemtune,k3s,kuma,provision,firewall,report}.yml, files/{root/iptables.sh, root/autoexec.bat, kuma/provision_kuma.py}, templates/*.j2}, docs/adr/0001+0002, README.md, GLOSSARY.md, .gitignore additions. Nothing committed or pushed.
 - Verified locally: bash -n; py_compile; yamllint/yq on all YAML; all .j2 templates render with Jinja2 into valid YAML (Traefik values, Kuma manifest checked); preflight assertions tested on 1 valid + 11 broken configs; provision_kuma.py tested against an in-memory fake API (dry run, first run, idempotent 2nd run = 0 changes, drift repair, unmanaged warning, wrong password exit 1, secrets never in console/file log, bad config exit 2) - this found and fixed a real bug (`method` kwarg clash).
-- NOT verified (cannot be run here): Ansible itself (syntax-check impossible on Windows), uptime-kuma-api2 2.9.0 vs real Kuma 2.5.6, K3s/Traefik behaviour on 1 GB, DNS override on a DigitalOcean droplet, firewall on real iptables-nft, Let's Encrypt issuance.
+- Verified on the server since: Ansible run, uptime-kuma-api2 2.9.0 with Kuma 2.5.6, DNS override on DigitalOcean, K3s/Traefik on 1 GB, Let's Encrypt issuance (staging). STILL unverified: the firewall on real iptables-nft, memory over days.
 
 ## Done
 - Grilling session (Q1-Q25) finished and user confirmed; code, ADRs, README written; static checks done.
+- Server `icfmonitor` is configured end to end EXCEPT the firewall step (held for the user's go): preflight, Google DNS (global + per-link, verified Google-only), base, 1 GB tuning, K3s v1.36.5+k3s1, Traefik (Let's Encrypt STAGING certificate issued for the UI domain over HTTP-01; http -> https 301), Kuma 2.5.6 pod, provisioning (RunId smb89hx: created=21 updated=1 = admin, settings, Telegram channel, 2 Groups, 17 Targets); a second dry run gives changed=0 (idempotent). Run 1 failed on a timeout (Traefik wait), runs 2-3 on a Kuma greeting race; both fixed (commits 517a752, f41180b, a67a2b3).
+- Root cause of the provisioning failure (PROVEN with a verbose Socket.IO probe on the server): the client emits `needSetup` ~8 ms before Kuma finished `await sendInfo` and registered its handlers, so the call is dropped unanswered. The pre-login `info` event has no `version` and uptime-kuma-api2 ignores it, so waiting for `api.info()` can never work. Fix (a67a2b3) = 2 s pause + `need_setup` retries (5 x 5 s); the real dry run then answered on the first attempt.
+- SSH access for Claude: alias `icfmonitor-root` (dedicated key ~/.ssh/id_claude_icfmonitor, host key verified by fingerprint). Revoke: delete the config block + key files + the "claude-icfmonitor" line in /root/.ssh/authorized_keys.
 
 ## Now
-- FIRST SERVER RUN (RunId 108qke1, host `icfmonitor`) failed at "K3s - wait for Traefik" - ROOT CAUSE = TIMEOUT, not a bug: on 1 vCPU/1 GB the helm controller needed ~9 min (CRD chart job 4m22s, then helm-install-traefik 8m32s with 6 restarts); Ansible waited ~8 min and gave up ~30 s before the Deployment appeared. Server diagnostics afterwards: traefik, svclb, coredns, local-path, uptime-kuma all Running, node Ready, no taints/pressure; no schema/values problem.
-- FIXED in repo (not yet committed/pushed, not yet re-run on the server): Traefik wait raised to 90x10 s with rescue -> new `playbooks/diagnostics.yml` (read-only snapshot printed into the run log); same rescue on the Kuma wait.
-- NEW FINDING + FIX: `resolvectl status` showed Global DNS = 8.8.8.8 8.8.4.4 + 10.114.15.254 (DigitalOcean resolver appended by its own drop-in, read AFTER our `90-` file). Per-link DNS (eth0/eth1) already Google-only (networkd override works). Fix: global drop-in renamed `zz-monitoring-vm-google-dns.conf`, starts with an empty `DNS=`; old `90-...` file removed by the playbook.
-- Resource observation on the server: Mem 956 MB, used 432, swap 562/1023 MB used, kubelet "housekeeping took too long", one CoreDNS liveness timeout -> box is strained, still stable (load 0.2-0.8). Fallback = 2 GB droplet (ADR 0001). Watch after provisioning adds 17 checks every 30 s.
-- SECOND SERVER RUN (RunId 0hm5xv8): everything passed up to provisioning (K3s, Traefik, Kuma rollouts OK; venv created; Kuma ClusterIP 10.43.249.254). `provision_kuma.py` connected but `need_setup` got NO ANSWER (30 s Timeout, empty message) -> run failed; firewall step NOT reached yet.
-- DIAGNOSIS (strong hypothesis, from Kuma 2.5.6 server.js, NOT yet proven on the server): `io.on("connection")` does `await sendInfo(socket)` BEFORE registering `needSetup`/`login`/... handlers; uptime-kuma-api2 calls `needSetup` immediately after connect, so on a slow 1 vCPU box the event is dropped silently. (WS with no Origin is allowed; handlers are all registered right after sendInfo, no other awaits.)
-- FIX in repo (not committed, not yet run on server): provision_kuma.py now waits for the `info` event (`api.info()`, logs the Kuma version) + 1 s, retries `need_setup` up to 3x on Timeout, logs exception type, default timeout 20 s; provision.yml has block/rescue that prints cluster diagnostics + tail of the script's DEBUG log on failure. Fake-API tests (incl. dropped first needSetup and never-answered cases) pass.
-- If it still fails: need `/var/log/monitoring-vm/kuma_provision_<RunId>.log` and `k3s kubectl -n uptime-kuma logs deployment/uptime-kuma --tail=60` (the rescue prints both).
-- NEXT for user: commit+push, `git pull` on the server, re-run `run_ansible.sh`.
+- Kuma monitors 17 Targets; its log shows 3 genuinely failing: the GWT-based MyMonit Target (HTTP 200 but marker `Main.nocache.js` not in the response body -> semantics of the old check_status.sh marker probably differ), a MyMonit demo Target (ECONNREFUSED on :443 from the new IP), the MyMonit Target on port 1080 (timeout; that port is probably restricted to trusted IPs). The new VM's public IP likely has to be allowed on those hosts' firewalls.
+- BLOCKER for alerts: Telegram answers HTTP 400 "Bad Request: chat not found" -> `telegram.chat_id` in the Private config is wrong, or the bot is not in that chat / was never started. The user must correct it (I do not read that file), then `run_ansible.sh --tags provision` updates the channel.
+- Waiting for the user: (1) go/no-go for the firewall step, (2) correct chat_id, (3) decision on the 3 failing Targets, (4) when satisfied set `acme_use_staging: false` in the Private config and re-run.
+- Server memory after provisioning: used ~395 MB, swap 618/1023 MB (stable).
 
 ## Next
-- After the first real run: read output/logs; fix issues found (most likely spots: uptime-kuma-api2 vs Kuma 2.5.6 (fallback pin Kuma 2.5.0-slim), DNS override, Traefik redirect/ACME values, RAM). Then set `acme_use_staging: false`. Un-comment the 8 ICFMonit targets once reachable and give them literal markers.
-- Optional: `git add --chmod=+x run_ansible.sh`, review and commit (user decides).
+- Firewall: `ssh icfmonitor-root 'cd /opt/monitoring-vm && bash run_ansible.sh --tags firewall'` only after the user's OK (lockout check uses this machine's SSH IP, which the user says is in trusted_ips); verify with a NEW ssh session, `iptables -S MVM_IN`, `iptables -t mangle -S MVM_PRE`, 80/443 answering.
+- After Telegram works: confirm one real alert arrives (a failing Target should notify).
+- Un-comment the 8 ICFMonit targets once reachable and give them literal markers. Possible follow-up: `--status` mode for provision_kuma.py (list Targets with last heartbeat).
+- Remind the user to remove the claude-icfmonitor key from /root/.ssh/authorized_keys when done.
 
 ## Open questions (UNCONFIRMED)
-- Are the 8 non-resolving ICFMonit hosts reachable from the internet (or retired / private)?
-- Does uptime-kuma-api2 2.9.0 work with Kuma 2.5.6? Result of first server run.
+- Correct Telegram chat_id / is the bot in the chat.
+- Semantics of the old `check_status.sh` marker for the GWT-based MyMonit Target.
+- Are the demo Target and the port-1080 Target reachable from the new IP (their firewalls)? Are the 8 non-resolving ICFMonit hosts reachable from the internet?
 
 ## Working set (files/ids/commands)
 - Run on server: `bash /opt/monitoring-vm/run_ansible.sh [--check --diff] [--tags dns,base,tune,k3s,kuma,provision,firewall]`

@@ -1,4 +1,7 @@
 # {{ ansible_managed }}
+# Read after the provider's drop-ins (file name "zz-..."): the empty "DNS=" clears every
+# resolver they added, then only Google DNS is left in the global list.
 [Resolve]
+DNS=
 DNS={{ google_dns | join(' ') }}
 FallbackDNS=

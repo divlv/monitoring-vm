@@ -1,0 +1,27 @@
+# Read-only snapshot of the cluster, included from the "rescue" part of the waits in
+# k3s.yml and kuma.yml so that a failed run explains itself in its own log.
+- name: Diagnostics - collect (read-only)
+  ansible.builtin.shell: "{{ item }} 2>&1 | tail -n 40"
+  args:
+    executable: /bin/bash
+  loop:
+    - free -m
+    - swapon --show
+    - k3s kubectl get pods -A -o wide
+    - k3s kubectl -n kube-system get helmchart,helmchartconfig,jobs
+    - k3s kubectl -n kube-system logs job/helm-install-traefik --tail=30
+    - k3s kubectl -n uptime-kuma describe pods
+    - k3s kubectl -n uptime-kuma logs deployment/uptime-kuma --tail=30
+    - k3s kubectl get events -A --sort-by=.lastTimestamp
+    - journalctl -u k3s --no-pager -n 30 | cut -c1-200
+  register: diagnostics
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Diagnostics - output
+  ansible.builtin.debug:
+    msg: "{{ ['$ ' ~ item.item] + item.stdout_lines }}"
+  loop: "{{ diagnostics.results }}"
+  loop_control:
+    label: "{{ item.item }}"

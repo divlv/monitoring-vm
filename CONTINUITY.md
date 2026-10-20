@@ -33,7 +33,11 @@
 - Grilling session (Q1-Q25) finished and user confirmed; code, ADRs, README written; static checks done.
 
 ## Now
-- Handing over to the user: they fill `config.local.yml` (acme_email, trusted_ips, kuma.admin_password, telegram.bot_token/chat_id), copy it to the server as /etc/monitoring-vm/config.yml and run `run_ansible.sh --check --diff`, then for real.
+- FIRST SERVER RUN (RunId 108qke1, host `icfmonitor`) failed at "K3s - wait for Traefik" - ROOT CAUSE = TIMEOUT, not a bug: on 1 vCPU/1 GB the helm controller needed ~9 min (CRD chart job 4m22s, then helm-install-traefik 8m32s with 6 restarts); Ansible waited ~8 min and gave up ~30 s before the Deployment appeared. Server diagnostics afterwards: traefik, svclb, coredns, local-path, uptime-kuma all Running, node Ready, no taints/pressure; no schema/values problem.
+- FIXED in repo (not yet committed/pushed, not yet re-run on the server): Traefik wait raised to 90x10 s with rescue -> new `playbooks/diagnostics.yml` (read-only snapshot printed into the run log); same rescue on the Kuma wait.
+- NEW FINDING + FIX: `resolvectl status` showed Global DNS = 8.8.8.8 8.8.4.4 + 10.114.15.254 (DigitalOcean resolver appended by its own drop-in, read AFTER our `90-` file). Per-link DNS (eth0/eth1) already Google-only (networkd override works). Fix: global drop-in renamed `zz-monitoring-vm-google-dns.conf`, starts with an empty `DNS=`; old `90-...` file removed by the playbook.
+- Resource observation on the server: Mem 956 MB, used 432, swap 562/1023 MB used, kubelet "housekeeping took too long", one CoreDNS liveness timeout -> box is strained, still stable (load 0.2-0.8). Fallback = 2 GB droplet (ADR 0001). Watch after provisioning adds 17 checks every 30 s.
+- NEXT for user: commit+push, `git pull` on the server, re-run `run_ansible.sh`; expected to proceed to Kuma wait, provisioning (first real test of uptime-kuma-api2 vs Kuma 2.5.6) and the firewall.
 
 ## Next
 - After the first real run: read output/logs; fix issues found (most likely spots: uptime-kuma-api2 vs Kuma 2.5.6 (fallback pin Kuma 2.5.0-slim), DNS override, Traefik redirect/ACME values, RAM). Then set `acme_use_staging: false`. Un-comment the 8 ICFMonit targets once reachable and give them literal markers.

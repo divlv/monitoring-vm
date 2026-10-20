@@ -83,11 +83,22 @@
   changed_when: false
   when: not ansible_check_mode
 
+# On 1 vCPU / 1 GB the helm controller needs 8-10 minutes (first the CRD chart, then Traefik
+# itself, with a few restarts of the install job in between), so wait up to 15 minutes.
 - name: K3s - wait for Traefik (installed by the helm controller)
-  ansible.builtin.command: k3s kubectl -n kube-system rollout status deployment/traefik --timeout=60s
-  register: traefik_ready
-  retries: 30
-  delay: 10
-  until: traefik_ready.rc == 0
-  changed_when: false
   when: not ansible_check_mode
+  block:
+    - name: K3s - Traefik deployment rolled out
+      ansible.builtin.command: k3s kubectl -n kube-system rollout status deployment/traefik --timeout=60s
+      register: traefik_ready
+      retries: 90
+      delay: 10
+      until: traefik_ready.rc == 0
+      changed_when: false
+  rescue:
+    - name: K3s - collect diagnostics
+      ansible.builtin.include_tasks: diagnostics.yml
+
+    - name: K3s - Traefik did not come up
+      ansible.builtin.fail:
+        msg: "Traefik did not come up within 15 minutes, see the diagnostics above."

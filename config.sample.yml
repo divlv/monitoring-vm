@@ -13,8 +13,7 @@
 # this server, because Traefik gets the HTTPS certificates with the Let's Encrypt HTTP-01 challenge.
 # `id`: lower-case letters, digits and '-'. The site with id "icf" is the Kuma that was installed
 # first and keeps its original Kubernetes names and data directory; other ids get their own.
-# (An older config with a single top-level `domain:` instead of `sites:` still works: one Kuma,
-# that domain, all Groups.)
+# `sites:` is mandatory (it replaced the old single `domain:`); a config without it is rejected.
 sites:
   - id: icf
     domain: status.example.com

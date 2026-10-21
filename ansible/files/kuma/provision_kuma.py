@@ -21,7 +21,8 @@ when any child does, so attaching it there too would send every alert twice.
 Sites: the config may define several ``sites``, each with its own domain and its own
 Groups; every site is a separate Kuma, so a site's UI shows nothing of the others. This
 script provisions ONE Kuma per call (``--site ID`` picks which Groups and domain apply).
-A config without ``sites`` still works: one Kuma, the old top-level ``domain``, all Groups.
+The ``sites`` block is mandatory: a config without it is rejected (exit 2) instead of silently
+merging every Group into one Kuma.
 
 Pruning: by default nothing is ever deleted. ``--prune`` additionally deletes the Kuma
 monitors that the config does not describe for this site (children first, then their
@@ -131,7 +132,7 @@ class ProvisionConfig:
     """The validated, normalised part of the Private config this script needs.
 
     Attributes:
-        site: Id of the site this Kuma serves ("" for a config without ``sites``).
+        site: Id of the site this Kuma serves.
         domain: Public host name of the Kuma UI of this site.
         admin_user: Kuma administrator login.
         admin_password: Kuma administrator password.
@@ -272,15 +273,17 @@ def _select_site(raw: dict, site_id: str | None) -> tuple[str, str, list[str]]:
         site_id: Id given with ``--site``, or None.
 
     Returns:
-        ``(site id, domain, names of its Groups)``. A config without ``sites`` is one
-        anonymous site: the top-level ``domain`` and every Group.
+        ``(site id, domain, names of its Groups)``.
 
     Raises:
-        ConfigError: If the site is unknown, ambiguous, or the sites do not partition the Groups.
+        ConfigError: If there is no ``sites`` block, the site is unknown or ambiguous, or the sites
+            do not partition the Groups.
     """
     group_names = [str(_require(group, "name")) for group in _require(raw, "groups")]
     if "sites" not in raw:
-        return "", str(_require(raw, "domain")), group_names
+        # No silent single-Kuma fallback: a config that lost its "sites:" block would merge
+        # every Group into one Kuma again (and --prune would not notice).
+        raise ConfigError("config has no 'sites:' block (the old single 'domain:' key was replaced by it)")
 
     sites = raw["sites"]
     if not isinstance(sites, list) or not sites:

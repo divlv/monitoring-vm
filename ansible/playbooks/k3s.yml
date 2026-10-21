@@ -129,3 +129,31 @@
     - name: K3s - Traefik did not come up
       ansible.builtin.fail:
         msg: "Traefik did not come up within 15 minutes, see the diagnostics above."
+
+# Traefik orders a certificate only for a domain that has NONE yet, in ANY resolver's store. The
+# STAGING certificates (browsers reject them) stay loaded from acme_staging.json, so after the
+# switch to production certificates (acme_use_staging: false) the "prod" resolver would never
+# order anything and the staging certificate would be served for ever (acme_prod.json stays empty).
+# So with the production resolver: move the obsolete staging store aside and restart Traefik once
+# (it reads the stores only at start). Later runs find the new store empty and do nothing.
+- name: ACME - obsolete staging certificates
+  when: acme_resolver == 'prod' and not ansible_check_mode
+  block:
+    - name: ACME - state of the staging store
+      ansible.builtin.stat:
+        path: "{{ traefik_data_dir }}/acme_staging.json"
+      register: acme_staging_store
+
+    - name: ACME - move the staging store aside
+      ansible.builtin.command: "mv {{ traefik_data_dir }}/acme_staging.json {{ traefik_data_dir }}/acme_staging.json.before-production"
+      when: acme_staging_store.stat.exists and acme_staging_store.stat.size > 0
+      register: acme_staging_moved
+
+    - name: ACME - restart Traefik so that it forgets the staging certificates
+      ansible.builtin.command: k3s kubectl -n kube-system rollout restart deployment/traefik
+      when: acme_staging_moved is changed
+
+    - name: ACME - wait for Traefik after the restart
+      ansible.builtin.command: k3s kubectl -n kube-system rollout status deployment/traefik --timeout=300s
+      when: acme_staging_moved is changed
+      changed_when: false

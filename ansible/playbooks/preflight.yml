@@ -60,15 +60,16 @@
     that:
       - cfg is mapping
       - cfg.acme_email is defined
-      - cfg.domain is defined or cfg.sites is defined
+      - cfg.sites is defined
       - cfg.trusted_ips is defined
       - cfg.kuma is defined and cfg.kuma.admin_user is defined and cfg.kuma.admin_password is defined
       - cfg.telegram is defined and cfg.telegram.bot_token is defined and cfg.telegram.chat_id is defined
       - cfg.groups is defined
     fail_msg: >-
-      {{ config_file }} is incomplete. Required keys: sites (or the older single domain),
-      acme_email, trusted_ips, kuma.admin_user, kuma.admin_password, telegram.bot_token,
-      telegram.chat_id, groups. See config.sample.yml.
+      {{ config_file }} is incomplete. Required keys: sites, acme_email, trusted_ips,
+      kuma.admin_user, kuma.admin_password, telegram.bot_token, telegram.chat_id, groups.
+      See config.sample.yml. Note: the old single "domain:" key was REPLACED by "sites:"
+      (one Kuma per domain); without it every Group would be merged into one Kuma again.
     quiet: true
 
 - name: Preflight - no placeholder values are left
@@ -117,11 +118,11 @@
 
 # --- Sites: one Kuma per domain, each showing only its own Groups -------------------------
 
-- name: Preflight - sites (several domains) or the older single domain
+# No fallback to a single "domain:": a config that lost its "sites:" block (e.g. an older copy of
+# the file was put back) must stop the run, not silently merge all Groups into one Kuma again.
+- name: Preflight - sites (one Kuma per domain)
   ansible.builtin.set_fact:
-    sites: >-
-      {{ cfg.sites if cfg.sites is defined else
-         [{'id': kuma_legacy_site, 'domain': cfg.domain, 'groups': cfg.groups | map(attribute='name') | list}] }}
+    sites: "{{ cfg.sites }}"
 
 - name: Preflight - sites are consistent
   ansible.builtin.assert:

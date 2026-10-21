@@ -3,15 +3,15 @@
 # is not in "trusted_ips" (lockout protection) and is run again on every boot by
 # /root/autoexec.bat (cron @reboot).
 
+# A template, not "join('\n')": Ansible leaves "\n" inside a Jinja string as two characters,
+# which glued several addresses into ONE line and made iptables.sh reject the file.
 - name: Firewall - Trusted IPs file (read by iptables.sh, also at boot)
-  ansible.builtin.copy:
+  ansible.builtin.template:
+    src: "{{ templates_dir }}/trusted_ips.j2"
     dest: /etc/monitoring-vm/trusted_ips
     owner: root
     group: root
     mode: "0600"
-    content: |
-      # Managed by Ansible from the Private config. One address or CIDR per line.
-      {{ cfg.trusted_ips | join('\n') }}
   no_log: true
 
 - name: Firewall - script

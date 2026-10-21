@@ -1,0 +1,4 @@
+# Managed by Ansible from the Private config (trusted_ips). One address or CIDR per line.
+{% for ip in cfg.trusted_ips %}
+{{ ip }}
+{% endfor %}

@@ -1,6 +1,6 @@
 # monitoring-vm
 
-Ansible configuration of the **Monitoring VM**: a small Ubuntu 26.04 server (DigitalOcean, 1 GB RAM / 1 vCPU) that runs single-node K3s with one Uptime Kuma per Status site (domain), checks the Targets of two Groups (`MyMonit`, `ICFMonit`) every 30 s and alerts to Telegram. Each Group is visible only on its own domain. Vocabulary: [GLOSSARY.md](GLOSSARY.md). Decisions: [docs/adr](docs/adr).
+Ansible configuration of the **Monitoring VM**: a small Ubuntu 26.04 server (DigitalOcean, 2 GB RAM / 1 vCPU; two Kumas did not fit in 1 GB, see [ADR 0001](docs/adr/0001-kuma-in-k3s-on-a-1gb-vm.md)) that runs single-node K3s with one Uptime Kuma per Status site (domain), checks the Targets of two Groups (`MyMonit`, `ICFMonit`) every 30 s and alerts to Telegram. Each Group is visible only on its own domain. Vocabulary: [GLOSSARY.md](GLOSSARY.md). Decisions: [docs/adr](docs/adr).
 
 Ansible runs **locally on the server, as root**. This repository is public: real Targets, domain, credentials and the Trusted IPs live only in the *Private config* on the server, never in git.
 

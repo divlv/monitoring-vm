@@ -38,17 +38,16 @@
 - SSH access for Claude: alias `icfmonitor-root` (dedicated key ~/.ssh/id_claude_icfmonitor, host key verified by fingerprint). Revoke: delete the config block + key files + the "claude-icfmonitor" line in /root/.ssh/authorized_keys.
 
 ## Now
-- IN PROGRESS (2026-10-21): the Status-site split. Code is pushed (f488caa, probe fix 4abc0df) and was exercised on the server (RunId x5fdone, `--tags k3s,kuma,provision -e kuma_prune=true`). Done on the server: `/etc/monitoring-vm/config.yml` got the `sites:` block (backup `config.yml.bak-<timestamp>`, 0600), the new site's manifest + data dir exist. A dry run of `--check --prune --site icf` showed exactly the expected 17 deletions (16 Targets + group MyMonit). NOT done: the real prune and the provisioning of the new Kuma - the run was stopped by hand.
-- WHY IT STALLED (proven): the 1 GB box thrashes with two Kumas + K3s (swap 700-800/1023 MB, `si/so` ~20 MB/s, `wa` 50-60%, disk reads up to 155 MB/s); HTTP checks of the running Kuma now often exceed 15 s (mass `timeout of 15000ms exceeded`; no alert spam only because Telegram is still misconfigured). My manifest also had a startupProbe without timeoutSeconds (default 1 s): under thrash it kept failing, the new pod stayed 0/1 and the kubelet restarted it in a loop. Fixed in the template (timeoutSeconds 10, 4abc0df), pulled on the server but NOT applied (applying restarts both Kumas).
-- DECISION PENDING (user): resize the droplet to 2 GB (CPU+RAM only, reversible) - recommended; meanwhile scale the new deployment (`-n uptime-kuma-my`) to 0 to calm the box; or revert the split (restore the config backup, remove the new namespace). After a resize the box reboots, which also tests that autoexec.bat re-applies the firewall.
+- DONE (2026-10-21): the Status-site split. Config on the server has the `sites:` block (backup `config.yml.bak-<timestamp>` kept, 0600). The droplet was resized to 2 GB by the user (1 vCPU) after two Kumas thrashed on 1 GB (swap 700-800 MB, `si/so` ~20 MB/s, IO wait 50-60 %, mass check timeouts) - see ADR 0001 outcome. The resize reboot also PROVED the boot path: `autoexec.bat` re-applied the firewall 18 s after boot, K3s/Kuma came up on their own.
+- Final run RunId bzt25d6 (`--tags k3s,kuma,provision -e kuma_prune=true`): ok=38 failed=0. icf Kuma: deleted=17 (16 MyMonit Targets + the group), unchanged=4; my Kuma (new): created=19 updated=1 (admin, Telegram channel, group MyMonit, 16 Targets, settings). Dry runs with `--check --prune` for both sites now give changed=0 deleted=0. Both domains answer: http -> 301 -> https -> 302 (login), each with its own Let's Encrypt STAGING certificate. Both pods 1/1, 0 restarts; memory 1.09/1.96 GB, swap ~96 MB, no swap traffic.
+- Startup probe fixed (timeoutSeconds 10, commit 4abc0df); `-e kuma_prune=true` is only needed for the one-off removal, normal runs never delete.
 - Kuma monitors 17 Targets; its log shows 3 genuinely failing: the GWT-based MyMonit Target (HTTP 200 but marker `Main.nocache.js` not in the response body -> semantics of the old check_status.sh marker probably differ), a MyMonit demo Target (ECONNREFUSED on :443 from the new IP), the MyMonit Target on port 1080 (timeout; that port is probably restricted to trusted IPs). The new VM's public IP likely has to be allowed on those hosts' firewalls.
 - BLOCKER for alerts: Telegram answers HTTP 400 "Bad Request: chat not found" -> `telegram.chat_id` in the Private config is wrong, or the bot is not in that chat / was never started. The user must correct it (I do not read that file), then `run_ansible.sh --tags provision` updates the channel.
 - Firewall APPLIED and verified: a NEW SSH session works; INPUT policy DROP + MVM_IN, mangle MVM_PRE hooked on eth0/eth1, IPv4 + IPv6; 80/443 answer (http 301, https 302); cluster, DNS and outbound traffic fine; cron @reboot autoexec.bat present. Three transient DNS errors in Kuma right after it were machine load (0 in a quiet 2.5 min). Re-application at boot is NOT yet tested (no reboot done).
 - Waiting for the user: (1) correct chat_id, (2) decision on the 3 failing Targets, (3) later (user will do it): `acme_use_staging: false` in the Private config + re-run.
-- Server memory after provisioning: used ~395 MB, swap 618/1023 MB (stable).
 
 ## Next
-- Optional, needs the user's OK: a reboot test to prove autoexec.bat re-applies the firewall at boot (and that K3s/Kuma come back on 1 GB). Note: every `k3s kubectl` call loads the strained 1 GB box (swap ~590/1023 MB) - keep diagnostics sparse.
+- (Reboot test DONE on 2026-10-21 during the resize: autoexec.bat re-applied the firewall 18 s after boot.) Keep `k3s kubectl` calls sparse anyway: each loads a ~100 MB binary.
 - After Telegram works: confirm one real alert arrives (a failing Target should notify).
 - Un-comment the 8 ICFMonit targets once reachable and give them literal markers. Possible follow-up: `--status` mode for provision_kuma.py (list Targets with last heartbeat).
 - Remind the user to remove the claude-icfmonitor key from /root/.ssh/authorized_keys when done.
@@ -59,7 +58,7 @@
 - Are the demo Target and the port-1080 Target reachable from the new IP (their firewalls)? Are the 8 non-resolving ICFMonit hosts reachable from the internet?
 
 ## Working set (files/ids/commands)
-- Run on server: `bash /opt/monitoring-vm/run_ansible.sh [--check --diff] [--tags dns,base,tune,k3s,kuma,provision,firewall]`
-- Script dry run: `/opt/monitoring-vm-venv/bin/python -I ansible/files/kuma/provision_kuma.py --check --url http://<kuma-clusterip>:3001 --config /etc/monitoring-vm/config.yml`
+- Run on server (connect with the exact ssh command from the assistant's local memory, PowerShell tool): `bash /opt/monitoring-vm/run_ansible.sh [--check --diff] [--tags dns,base,tune,k3s,kuma,provision,firewall] [-e kuma_prune=true]`
+- Script dry run (per site): `/opt/monitoring-vm-venv/bin/python -I ansible/files/kuma/provision_kuma.py --check [--prune] --site <id> --url http://<kuma-clusterip>:3001 --config /etc/monitoring-vm/config.yml` (Kuma namespaces: `uptime-kuma` for icf, `uptime-kuma-<id>` for others)
 - Logs on server: `/var/log/monitoring-vm/{run_*.log,kuma_provision_*.log,firewall.log,autoexec.log}`
 - Repo: https://github.com/divlv/monitoring-vm (branch main)

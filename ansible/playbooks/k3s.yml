@@ -149,8 +149,22 @@
       when: acme_staging_store.stat.exists and acme_staging_store.stat.size > 0
       register: acme_staging_moved
 
-    - name: ACME - restart Traefik so that it forgets the staging certificates
-      ansible.builtin.command: k3s kubectl -n kube-system rollout restart deployment/traefik
+    # Stop, wait, start - NOT "rollout restart": a rolling restart runs the old and the new pod side
+    # by side, the new one orders the certificate and publishes the challenge token, but Let's
+    # Encrypt's validation request can be balanced to the old pod, which does not know the token:
+    # "Invalid response ... 404" and the order fails.
+    - name: ACME - stop Traefik so that it forgets the staging certificates
+      ansible.builtin.command: k3s kubectl -n kube-system scale deployment/traefik --replicas=0
+      when: acme_staging_moved is changed
+
+    - name: ACME - wait until the Traefik pod is gone
+      ansible.builtin.command: k3s kubectl -n kube-system wait --for=delete pod -l app.kubernetes.io/name=traefik --timeout=120s
+      when: acme_staging_moved is changed
+      changed_when: false
+      failed_when: false
+
+    - name: ACME - start Traefik again (a single pod)
+      ansible.builtin.command: k3s kubectl -n kube-system scale deployment/traefik --replicas=1
       when: acme_staging_moved is changed
 
     - name: ACME - wait for Traefik after the restart

@@ -81,6 +81,9 @@ spec:
               path: /
               port: 3001
             periodSeconds: 5
+            # The default timeout is 1 s: on this 1 GB box (swapping) a probe regularly needs
+            # longer, fails, and the pod never leaves "0/1" although Kuma answers in milliseconds.
+            timeoutSeconds: 10
             failureThreshold: 120
           readinessProbe:
             httpGet:

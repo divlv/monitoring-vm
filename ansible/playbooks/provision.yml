@@ -1,7 +1,9 @@
-# Creates the Kuma administrator, the Telegram alert channel, the two Groups and all
-# Targets from the Private config. The script (files/kuma/provision_kuma.py) reads the
-# secrets from the config file itself, so none of them passes through Ansible variables
-# or command lines. It only creates/updates, it never deletes anything.
+# Creates, in EACH site's Kuma, the administrator, the Telegram alert channel, the site's
+# Groups and all their Targets from the Private config. The script (files/kuma/provision_kuma.py)
+# reads the secrets from the config file itself, so none of them passes through Ansible
+# variables or command lines. It only creates/updates, it never deletes anything unless
+# -e kuma_prune=true (then it also deletes the monitors the config does not describe for
+# that site, e.g. a Group that was moved to another site).
 # --check on the script (not Ansible's --check) shows what it WOULD change.
 
 - name: Provision - python virtualenv with the Kuma API client (system packages kept for PyYAML)
@@ -11,55 +13,75 @@
     virtualenv_command: python3 -m venv
     virtualenv_site_packages: true
 
-- name: Provision - cluster IP of the Kuma service (the host reaches it through kube-proxy)
-  ansible.builtin.command: "k3s kubectl -n {{ kuma_namespace }} get service uptime-kuma -o jsonpath={.spec.clusterIP}"
-  register: kuma_cluster_ip
+- name: Provision - cluster IP of each site's Kuma service (the host reaches it through kube-proxy)
+  ansible.builtin.command: "k3s kubectl -n {{ site.namespace }} get service uptime-kuma -o jsonpath={.spec.clusterIP}"
+  register: kuma_cluster_ips
   changed_when: false
   when: not ansible_check_mode
+  loop: "{{ kuma_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.id }}"
 
-- name: Provision - Kuma Groups, Targets and alert channel
+- name: Provision - Kuma Groups, Targets and alert channel of every site
   when: not ansible_check_mode
   block:
-    - name: Provision - run the script
+    - name: Provision - run the script for each site
       ansible.builtin.command:
-        argv:
+        argv: "{{ script_argv + (['--prune'] if kuma_prune | bool else []) }}"
+      vars:
+        script_argv:
           - "{{ kuma_venv }}/bin/python"
           - -I
           - "{{ files_dir }}/kuma/provision_kuma.py"
           - --url
-          - "http://{{ kuma_cluster_ip.stdout }}:3001"
+          - "http://{{ item.stdout }}:3001"
+          - --site
+          - "{{ item.site.id }}"
           - --config
           - "{{ config_file }}"
           - --run-id
           - "{{ run_id }}"
           - --log-file
-          - "{{ log_dir }}/kuma_provision_{{ run_id }}.log"
+          - "{{ log_dir }}/kuma_provision_{{ run_id }}_{{ item.site.id }}.log"
       register: kuma_provision
       changed_when: "'RESULT changed=0 ' not in kuma_provision.stdout"
+      loop: "{{ kuma_cluster_ips.results }}"
+      loop_control:
+        label: "{{ item.site.id }}"
   rescue:
+    # apply/tags: without it the included tasks would be skipped under --tags
     - name: Provision - the script failed, collect diagnostics
-      ansible.builtin.include_tasks: diagnostics.yml
+      ansible.builtin.include_tasks:
+        file: diagnostics.yml
+        apply:
+          tags: [always]
 
-    - name: Provision - tail of the script's own DEBUG log (secrets are masked in it)
-      ansible.builtin.shell: "tail -n 40 {{ log_dir }}/kuma_provision_{{ run_id }}.log | cut -c1-400"
+    - name: Provision - tail of the script's own DEBUG logs (secrets are masked in them)
+      ansible.builtin.shell: "for f in {{ log_dir }}/kuma_provision_{{ run_id }}_*.log; do echo \"## $f\"; tail -n 30 \"$f\" | cut -c1-400; done"
+      args:
+        executable: /bin/bash
       register: kuma_provision_log
       changed_when: false
       failed_when: false
 
-    - name: Provision - show the log tail
+    - name: Provision - show the log tails
       ansible.builtin.debug:
         var: kuma_provision_log.stdout_lines
 
     - name: Provision - failed
       ansible.builtin.fail:
-        msg: "provision_kuma.py failed, see its output, the log tail and the diagnostics above."
+        msg: "provision_kuma.py failed, see its output, the log tails and the diagnostics above."
 
-- name: Provision - result
+- name: Provision - result per site
   ansible.builtin.debug:
-    var: kuma_provision.stdout_lines
+    msg: "{{ ['## ' ~ item.item.site.id] + item.stdout_lines }}"
+  loop: "{{ kuma_provision.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.site.id }}"
   when: not ansible_check_mode
 
 - name: Provision - skipped in check mode
   ansible.builtin.debug:
-    msg: "Skipped in --check mode. Dry run on a running server: {{ kuma_venv }}/bin/python -I {{ files_dir }}/kuma/provision_kuma.py --check --url http://<service-ip>:3001 --config {{ config_file }}"
+    msg: "Skipped in --check mode. Dry run on a running server: {{ kuma_venv }}/bin/python -I {{ files_dir }}/kuma/provision_kuma.py --check --site <id> --url http://<service-ip>:3001 --config {{ config_file }}"
   when: ansible_check_mode

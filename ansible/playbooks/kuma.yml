@@ -1,30 +1,46 @@
-# The Kuma manifest itself is applied by K3s (see k3s.yml); here we only wait for it.
+# The Kuma manifests themselves are applied by K3s (see k3s.yml); here we only wait for them.
+# There is one Kuma per site (domain), each in its own namespace.
 
-- name: Kuma - wait for the deployment (image pull + first start on 1 vCPU can take minutes)
+- name: Kuma - wait for the deployments (image pull + first start on 1 vCPU can take minutes)
   when: not ansible_check_mode
   block:
-    - name: Kuma - deployment rolled out
-      ansible.builtin.command: "k3s kubectl -n {{ kuma_namespace }} rollout status deployment/uptime-kuma --timeout=60s"
+    - name: Kuma - deployment of each site rolled out
+      ansible.builtin.command: "k3s kubectl -n {{ site.namespace }} rollout status deployment/uptime-kuma --timeout=60s"
       register: kuma_ready
       retries: 40
       delay: 15
       until: kuma_ready.rc == 0
       changed_when: false
+      loop: "{{ kuma_sites }}"
+      loop_control:
+        loop_var: site
+        label: "{{ site.id }} ({{ site.namespace }})"
   rescue:
+    # apply/tags: without it the included tasks would be skipped under --tags
     - name: Kuma - collect diagnostics
-      ansible.builtin.include_tasks: diagnostics.yml
+      ansible.builtin.include_tasks:
+        file: diagnostics.yml
+        apply:
+          tags: [always]
 
     - name: Kuma - did not come up
       ansible.builtin.fail:
-        msg: "Uptime Kuma did not come up within 10 minutes, see the diagnostics above."
+        msg: "An Uptime Kuma did not come up within 10 minutes, see the diagnostics above."
 
-- name: Kuma - pods and ingress (for the log)
-  ansible.builtin.command: "k3s kubectl -n {{ kuma_namespace }} get pods,svc,ingress -o wide"
+- name: Kuma - pods, services and ingresses (for the log)
+  ansible.builtin.command: "k3s kubectl -n {{ site.namespace }} get pods,svc,ingress -o wide"
   register: kuma_state
   changed_when: false
   check_mode: false
   failed_when: false
+  loop: "{{ kuma_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.id }} ({{ site.namespace }})"
 
 - name: Kuma - state
   ansible.builtin.debug:
-    var: kuma_state.stdout_lines
+    msg: "{{ ['## ' ~ item.site.id ~ ' -> https://' ~ item.site.domain] + item.stdout_lines }}"
+  loop: "{{ kuma_state.results }}"
+  loop_control:
+    label: "{{ item.site.id }}"

@@ -18,6 +18,15 @@ What is provisioned:
 The alert channel is attached to the Targets only, never to the Groups: a Group goes DOWN
 when any child does, so attaching it there too would send every alert twice.
 
+Sites: the config may define several ``sites``, each with its own domain and its own
+Groups; every site is a separate Kuma, so a site's UI shows nothing of the others. This
+script provisions ONE Kuma per call (``--site ID`` picks which Groups and domain apply).
+A config without ``sites`` still works: one Kuma, the old top-level ``domain``, all Groups.
+
+Pruning: by default nothing is ever deleted. ``--prune`` additionally deletes the Kuma
+monitors that the config does not describe for this site (children first, then their
+Groups), e.g. the Groups that were moved to another site. Use ``--check --prune`` first.
+
 Secrets (Kuma admin password, Telegram bot token) are read from the config file here, so
 they never pass through Ansible variables or command lines, and they are masked as ***
 in every log record. The console shows INFO; the log file additionally holds DEBUG with
@@ -122,16 +131,18 @@ class ProvisionConfig:
     """The validated, normalised part of the Private config this script needs.
 
     Attributes:
-        domain: Public host name of the Kuma UI.
+        site: Id of the site this Kuma serves ("" for a config without ``sites``).
+        domain: Public host name of the Kuma UI of this site.
         admin_user: Kuma administrator login.
         admin_password: Kuma administrator password.
         telegram_token: Telegram bot token.
         telegram_chat_id: Telegram chat the alerts go to.
         notification_name: Name of the notification channel inside Kuma.
-        groups: Group names in config order, without duplicates.
-        targets: All Targets in config order.
+        groups: Group names of this site in config order, without duplicates.
+        targets: The Targets of this site's Groups in config order.
     """
 
+    site: str
     domain: str
     admin_user: str
     admin_password: str
@@ -253,14 +264,55 @@ def _require(raw: dict, *path: str) -> Any:
     return node
 
 
-def load_config(path: str) -> ProvisionConfig:
-    """Read and validate the Private config.
+def _select_site(raw: dict, site_id: str | None) -> tuple[str, str, list[str]]:
+    """Pick the site this call is about.
+
+    Args:
+        raw: The parsed config.
+        site_id: Id given with ``--site``, or None.
+
+    Returns:
+        ``(site id, domain, names of its Groups)``. A config without ``sites`` is one
+        anonymous site: the top-level ``domain`` and every Group.
+
+    Raises:
+        ConfigError: If the site is unknown, ambiguous, or the sites do not partition the Groups.
+    """
+    group_names = [str(_require(group, "name")) for group in _require(raw, "groups")]
+    if "sites" not in raw:
+        return "", str(_require(raw, "domain")), group_names
+
+    sites = raw["sites"]
+    if not isinstance(sites, list) or not sites:
+        raise ConfigError("config key 'sites' must be a non-empty list")
+    ids = [str(_require(site, "id")) for site in sites]
+    if len(set(ids)) != len(ids):
+        raise ConfigError("duplicate site ids in 'sites'")
+    assigned = [str(name) for site in sites for name in (_require(site, "groups"))]
+    if sorted(assigned) != sorted(group_names):
+        raise ConfigError("every Group must belong to exactly one site: check the 'groups' lists in 'sites'")
+
+    if site_id is None:
+        if len(sites) != 1:
+            raise ConfigError(f"the config defines {len(sites)} sites, choose one with --site ({', '.join(ids)})")
+        site = sites[0]
+    else:
+        matching = [site for site in sites if str(site["id"]) == site_id]
+        if not matching:
+            raise ConfigError(f"unknown site '{site_id}', the config has: {', '.join(ids)}")
+        site = matching[0]
+    return str(site["id"]), str(_require(site, "domain")), [str(name) for name in site["groups"]]
+
+
+def load_config(path: str, site_id: str | None = None) -> ProvisionConfig:
+    """Read and validate the Private config for one site.
 
     Args:
         path: Path of the YAML config file.
+        site_id: Which site's Groups and domain to load (see :func:`_select_site`).
 
     Returns:
-        The normalised configuration.
+        The normalised configuration of that site.
 
     Raises:
         ConfigError: If the file cannot be read or a required value is missing/invalid.
@@ -273,6 +325,7 @@ def load_config(path: str) -> ProvisionConfig:
     if not isinstance(raw, dict):
         raise ConfigError(f"config {path} is not a YAML mapping")
 
+    site, domain, site_groups = _select_site(raw, site_id)
     defaults = {**DEFAULT_MONITORING, **(raw.get("monitoring") or {})}
     groups: list[str] = []
     targets: list[TargetSpec] = []
@@ -280,6 +333,8 @@ def load_config(path: str) -> ProvisionConfig:
 
     for group in _require(raw, "groups"):
         group_name = _require(group, "name")
+        if group_name not in site_groups:
+            continue
         if group_name not in groups:
             groups.append(group_name)
         for target in group.get("targets") or []:
@@ -304,9 +359,10 @@ def load_config(path: str) -> ProvisionConfig:
             ))
 
     if not targets:
-        raise ConfigError("no Targets configured")
+        raise ConfigError(f"no Targets configured{f' for site {site!r}' if site else ''}")
     return ProvisionConfig(
-        domain=str(_require(raw, "domain")),
+        site=site,
+        domain=domain,
         admin_user=str(_require(raw, "kuma", "admin_user")),
         admin_password=str(_require(raw, "kuma", "admin_password")),
         telegram_token=str(_require(raw, "telegram", "bot_token")),
@@ -349,20 +405,23 @@ class Provisioner:
     """Applies a :class:`ProvisionConfig` to a connected Kuma.
 
     Attributes:
-        stats: Counter of ``created``, ``updated`` and ``unchanged`` objects.
+        stats: Counter of ``created``, ``updated``, ``deleted`` and ``unchanged`` objects.
     """
 
-    def __init__(self, api: UptimeKumaApi, config: ProvisionConfig, check_only: bool) -> None:
+    def __init__(self, api: UptimeKumaApi, config: ProvisionConfig, check_only: bool, prune: bool = False) -> None:
         """Create a provisioner.
 
         Args:
             api: Connected Kuma API client.
             config: What Kuma must look like afterwards.
             check_only: When True nothing is written, the plan is only logged.
+            prune: When True the monitors that the config does not describe are deleted
+                instead of only being reported.
         """
         self.api = api
         self.cfg = config
         self.check_only = check_only
+        self.prune = prune
         self.stats: Counter[str] = Counter()
         self._notification_id: int = -1   # -1 = does not exist yet (only possible in check mode)
         self._group_ids: dict[str, int] = {}
@@ -592,13 +651,30 @@ class Provisioner:
             elif self._write(f"update {label} ({sorted(changes)})", "updated"):
                 self._call(self.api.edit_monitor, existing["id"], **changes)
 
-    def report_unmanaged(self) -> None:
-        """Warn about monitors Kuma has that the config does not describe (never deleted)."""
+    def _unmanaged(self) -> list[dict]:
+        """Monitors Kuma has that the config does not describe, children before their Groups."""
         wanted = {(self._group_ids[t.group], t.name) for t in self.cfg.targets}
         wanted |= {(None, group) for group in self.cfg.groups}
-        extra = [m["name"] for m in self._monitors if (m.get("parent"), m["name"]) not in wanted]
-        if extra:
-            LOG.warning("Monitors in Kuma that are not in the config (left untouched): %s", extra)
+        extra = [m for m in self._monitors if (m.get("parent"), m["name"]) not in wanted]
+        # The API client deletes a Group WITHOUT its children (they would only be unlinked),
+        # so children go first.
+        return sorted(extra, key=lambda m: m.get("parent") is None)
+
+    def handle_unmanaged(self) -> None:
+        """Report monitors the config does not describe, or delete them when pruning."""
+        extra = self._unmanaged()
+        if not extra:
+            return
+        if not self.prune:
+            LOG.warning("Monitors in Kuma that are not in the config (left untouched, --prune would delete them): %s",
+                        [m["name"] for m in extra])
+            return
+        names = {m["id"]: m["name"] for m in self._monitors}
+        for monitor in extra:
+            parent = names.get(monitor.get("parent"))
+            label = f"monitor '{monitor['name']}'" + (f" of group '{parent}'" if parent else "")
+            if self._write(f"delete {label}", "deleted"):
+                self._call(self.api.delete_monitor, monitor["id"])
 
     def run(self) -> None:
         """Apply everything, in dependency order."""
@@ -609,7 +685,7 @@ class Provisioner:
         self.ensure_notification()
         self.ensure_groups()
         self.ensure_targets()
-        self.report_unmanaged()
+        self.handle_unmanaged()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -629,7 +705,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="console log level (default INFO)")
     parser.add_argument("--timeout", type=float, default=20.0, help="seconds to wait for each API answer (default 20)")
+    parser.add_argument("--site", help="id of the site (domain + Groups) this Kuma serves; required when the config has several")
     parser.add_argument("--check", action="store_true", help="dry run: log what would change, write nothing")
+    parser.add_argument("--prune", action="store_true",
+                        help="also DELETE monitors the config does not describe (use with --check first)")
     return parser.parse_args(argv)
 
 
@@ -644,20 +723,22 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = parse_args(argv)
     formatter = setup_logging(args.run_id, args.log_file, args.log_level)
-    LOG.info("Kuma provisioning started (%s)", "CHECK ONLY, nothing will be written" if args.check else "applying")
+    LOG.info("Kuma provisioning started (%s%s)", "CHECK ONLY, nothing will be written" if args.check else "applying",
+             ", PRUNE: unmanaged monitors are deleted" if args.prune else "")
 
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, args.site)
     except ConfigError as exc:
         LOG.error("%s", exc)
         return EXIT_CONFIG
     formatter.add_secrets(config.secrets)
-    LOG.info("Config: %d Group(s), %d Target(s), UI https://%s", len(config.groups), len(config.targets), config.domain)
+    LOG.info("Site '%s': %d Group(s) %s, %d Target(s), UI https://%s", config.site or "-", len(config.groups),
+             config.groups, len(config.targets), config.domain)
 
     provisioner: Provisioner | None = None
     try:
         with connect(args.url, args.timeout) as api:
-            provisioner = Provisioner(api, config, args.check)
+            provisioner = Provisioner(api, config, args.check, args.prune)
             provisioner.run()
     except (ProvisionError, UptimeKumaException) as exc:
         LOG.error("%s: %s", type(exc).__name__, exc)  # a Timeout has an empty message
@@ -667,9 +748,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_FAILURE
 
     stats = provisioner.stats
-    changed = stats["created"] + stats["updated"]
-    LOG.info("RESULT changed=%d created=%d updated=%d unchanged=%d check=%s",
-             changed, stats["created"], stats["updated"], stats["unchanged"], args.check)
+    changed = stats["created"] + stats["updated"] + stats["deleted"]
+    LOG.info("RESULT changed=%d created=%d updated=%d deleted=%d unchanged=%d check=%s",
+             changed, stats["created"], stats["updated"], stats["deleted"], stats["unchanged"], args.check)
     return EXIT_OK
 
 

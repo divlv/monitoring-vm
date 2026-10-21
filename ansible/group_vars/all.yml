@@ -64,10 +64,26 @@ traefik_uid: 65532
 
 # --- Uptime Kuma ---------------------------------------------------------------------
 kuma_image: louislam/uptime-kuma:2.5.6-slim
-kuma_namespace: uptime-kuma
-kuma_data_dir: /opt/kuma-data
 kuma_memory_request: 128Mi
 kuma_memory_limit: 384Mi
+
+# One Kuma per site (domain), so one site's UI shows nothing of the others. Names of its objects:
+#   namespace  <kuma_namespace><suffix>      data dir  <kuma_data_dir><suffix>
+#   PV         <kuma_pv><suffix>             manifest  uptime-kuma<suffix>.yaml
+# where <suffix> is "" for the site whose id is kuma_legacy_site (the original, already running
+# Kuma keeps its names and data) and "-<id>" for every other site.
+kuma_legacy_site: icf
+kuma_namespace: uptime-kuma
+kuma_data_dir: /opt/kuma-data
+kuma_pv: uptime-kuma-data-pv
+
+# -e kuma_prune=true makes provision_kuma.py DELETE monitors the config does not describe for a
+# site (e.g. a Group moved to another site). Off by default: the script never deletes otherwise.
+kuma_prune: false
+
+# Site ids become part of Kubernetes names and directories.
+site_id_regex: '^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$'
+domain_regex: '^[A-Za-z0-9.-]+[.][A-Za-z]{2,}$'
 
 # Python venv with the Kuma socket.io API client (supports Kuma up to 2.5.0 officially;
 # 2.5.6 is UNVERIFIED - check the provisioning output on the first run).

@@ -1,6 +1,6 @@
 # monitoring-vm
 
-Ansible configuration of the **Monitoring VM**: a small Ubuntu 26.04 server (DigitalOcean, 1 GB RAM / 1 vCPU) that runs single-node K3s with Uptime Kuma, checks the Targets of two Groups (`MyMonit`, `ICFMonit`) every 30 s and alerts to Telegram. Vocabulary: [GLOSSARY.md](GLOSSARY.md). Decisions: [docs/adr](docs/adr).
+Ansible configuration of the **Monitoring VM**: a small Ubuntu 26.04 server (DigitalOcean, 1 GB RAM / 1 vCPU) that runs single-node K3s with one Uptime Kuma per Status site (domain), checks the Targets of two Groups (`MyMonit`, `ICFMonit`) every 30 s and alerts to Telegram. Each Group is visible only on its own domain. Vocabulary: [GLOSSARY.md](GLOSSARY.md). Decisions: [docs/adr](docs/adr).
 
 Ansible runs **locally on the server, as root**. This repository is public: real Targets, domain, credentials and the Trusted IPs live only in the *Private config* on the server, never in git.
 
@@ -29,7 +29,7 @@ bash /opt/monitoring-vm/run_ansible.sh --tags k3s,kuma  # only a part: dns, base
 3. **Base**: timezone Europe/Riga, packages, aliases, `autoexec.bat` + cron `@reboot`, security-only `unattended-upgrades` (never reboots by itself).
 4. **1 GB tuning**: 1 GB swap file, `vm.swappiness=10`, journald 100 MB, snapd masked.
 5. **K3s** (pinned version, `metrics-server` off) with Traefik: Let's Encrypt HTTP-01, **staging first** (`acme_use_staging: false` in the config, then re-run, for a trusted certificate).
-6. **Uptime Kuma** pod, then `ansible/files/kuma/provision_kuma.py` creates the admin, the Telegram channel, the Groups and Targets. It never deletes anything.
+6. **One Uptime Kuma per Status site** (its own namespace, data directory and ingress for its domain; the `sites:` block of the Private config assigns the Groups), then `ansible/files/kuma/provision_kuma.py` creates, in each, the same admin, the Telegram channel, that site's Groups and Targets. It never deletes anything, unless you add `-e kuma_prune=true` to also delete monitors that no longer belong to the site (e.g. a Group moved to another domain).
 7. **Firewall** (`iptables`/`ipset`, last): tcp 80/443 open to everyone, SSH and ping only from the Trusted IPs, the rest closed. It refuses to run if the IP of your SSH session is not trusted.
 
 A reboot is never done automatically; the run ends with a notice when `/var/run/reboot-required` exists.
@@ -37,7 +37,7 @@ A reboot is never done automatically; the run ends with a notice when `/var/run/
 ## Check afterwards
 
 ```bash
-k3s kubectl get pods -A          # traefik, uptime-kuma Running
+k3s kubectl get pods -A          # traefik and one uptime-kuma pod per site Running
 resolvectl status                # 8.8.8.8 / 8.8.4.4
 iptables -t mangle -S MVM_PRE ; iptables -S MVM_IN
 tail /var/log/monitoring-vm/*.log

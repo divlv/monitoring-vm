@@ -10,8 +10,8 @@
     - k3s kubectl get pods -A -o wide
     - k3s kubectl -n kube-system get helmchart,helmchartconfig,jobs
     - k3s kubectl -n kube-system logs job/helm-install-traefik --tail=30
-    - k3s kubectl -n uptime-kuma describe pods
-    - k3s kubectl -n uptime-kuma logs deployment/uptime-kuma --tail=30
+    - 'for ns in $(k3s kubectl get ns -o name | cut -d/ -f2 | grep "^uptime-kuma"); do echo "## $ns"; k3s kubectl -n $ns describe pods; done'
+    - 'for ns in $(k3s kubectl get ns -o name | cut -d/ -f2 | grep "^uptime-kuma"); do echo "## $ns"; k3s kubectl -n $ns logs deployment/uptime-kuma --tail=30; done'
     - k3s kubectl get events -A --sort-by=.lastTimestamp
     - journalctl -u k3s --no-pager -n 30 | cut -c1-200
   register: diagnostics

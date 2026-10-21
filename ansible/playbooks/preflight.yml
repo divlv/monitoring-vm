@@ -59,16 +59,16 @@
   ansible.builtin.assert:
     that:
       - cfg is mapping
-      - cfg.domain is defined
       - cfg.acme_email is defined
+      - cfg.domain is defined or cfg.sites is defined
       - cfg.trusted_ips is defined
       - cfg.kuma is defined and cfg.kuma.admin_user is defined and cfg.kuma.admin_password is defined
       - cfg.telegram is defined and cfg.telegram.bot_token is defined and cfg.telegram.chat_id is defined
       - cfg.groups is defined
     fail_msg: >-
-      {{ config_file }} is incomplete. Required keys: domain, acme_email, trusted_ips,
-      kuma.admin_user, kuma.admin_password, telegram.bot_token, telegram.chat_id, groups.
-      See config.sample.yml.
+      {{ config_file }} is incomplete. Required keys: sites (or the older single domain),
+      acme_email, trusted_ips, kuma.admin_user, kuma.admin_password, telegram.bot_token,
+      telegram.chat_id, groups. See config.sample.yml.
     quiet: true
 
 - name: Preflight - no placeholder values are left
@@ -80,12 +80,11 @@
 - name: Preflight - values look sane
   ansible.builtin.assert:
     that:
-      - cfg.domain is match('^[A-Za-z0-9.-]+[.][A-Za-z]{2,}$')
       - cfg.acme_email is match('^[^@ ]+@[^@ ]+[.][^@ ]+$')
       - cfg.kuma.admin_password | string | length >= 16
       - cfg.groups | length > 0
     fail_msg: >-
-      {{ config_file }}: domain must be a host name, acme_email an e-mail address,
+      {{ config_file }}: acme_email must be an e-mail address,
       kuma.admin_password at least 16 characters, groups a non-empty list.
     quiet: true
 
@@ -116,24 +115,74 @@
   ansible.builtin.set_fact:
     acme_resolver: "{{ 'staging' if (cfg.acme_use_staging | default(true) | bool) else 'prod' }}"
 
-# --- Domain ----------------------------------------------------------------------------
+# --- Sites: one Kuma per domain, each showing only its own Groups -------------------------
 
-- name: Preflight - resolve the UI domain
-  ansible.builtin.command: "getent ahostsv4 {{ cfg.domain }}"
-  register: domain_lookup
+- name: Preflight - sites (several domains) or the older single domain
+  ansible.builtin.set_fact:
+    sites: >-
+      {{ cfg.sites if cfg.sites is defined else
+         [{'id': kuma_legacy_site, 'domain': cfg.domain, 'groups': cfg.groups | map(attribute='name') | list}] }}
+
+- name: Preflight - sites are consistent
+  ansible.builtin.assert:
+    that:
+      - sites is sequence and sites is not string and sites | length > 0
+      - sites | selectattr('id', 'undefined') | list | length == 0
+      - sites | selectattr('domain', 'undefined') | list | length == 0
+      - sites | selectattr('groups', 'undefined') | list | length == 0
+      - sites | map(attribute='id') | map('string') | reject('match', site_id_regex) | list | length == 0
+      - sites | map(attribute='id') | list | unique | list | length == sites | length
+      - sites | map(attribute='domain') | map('string') | reject('match', domain_regex) | list | length == 0
+      - sites | map(attribute='domain') | list | unique | list | length == sites | length
+      - (sites | map(attribute='groups') | flatten | map('string') | sort | list) == (cfg.groups | map(attribute='name') | map('string') | sort | list)
+    fail_msg: >-
+      'sites' in {{ config_file }}: every site needs a unique id (lower-case letters, digits and '-'),
+      a unique domain name and a 'groups' list, and every Group must belong to exactly one site.
+    quiet: true
+
+# The site whose id is kuma_legacy_site is the Kuma that was installed first: it keeps its
+# original names and data directory (no suffix); every other site gets "-<id>".
+- name: Preflight - names of the objects of each site's Kuma
+  ansible.builtin.set_fact:
+    kuma_sites: >-
+      {{ (kuma_sites | default([])) + [site | combine({
+         'suffix': suffix,
+         'namespace': kuma_namespace ~ suffix,
+         'data_dir': kuma_data_dir ~ suffix,
+         'pv': kuma_pv ~ suffix,
+         'manifest': 'uptime-kuma' ~ suffix ~ '.yaml'})] }}
+  vars:
+    suffix: "{{ '' if site.id == kuma_legacy_site else '-' ~ site.id }}"
+  loop: "{{ sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.id }}"
+
+# --- Domains -----------------------------------------------------------------------------
+
+- name: Preflight - resolve the domain of every site
+  ansible.builtin.command: "getent ahostsv4 {{ site.domain }}"
+  register: domain_lookups
   changed_when: false
   failed_when: false
   check_mode: false
+  loop: "{{ sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.domain }}"
 
-- name: Preflight - warn when the UI domain does not point to this server
+- name: Preflight - warn when a domain does not point to this server
   ansible.builtin.debug:
     msg: >-
-      WARNING: {{ cfg.domain }} resolves to
-      {{ domain_lookup.stdout_lines | map('split') | map('first') | unique | list }},
+      WARNING: {{ item.site.domain }} resolves to
+      {{ item.stdout_lines | map('split') | map('first') | unique | list }},
       none of which is an address of this server
       ({{ ansible_facts['all_ipv4_addresses'] }}). The Let's Encrypt HTTP-01 challenge
       will fail unless the record points here (a reserved/floating IP is fine).
+  loop: "{{ domain_lookups.results }}"
+  loop_control:
+    label: "{{ item.site.domain }}"
   when: >-
-    domain_lookup.rc != 0 or
-    (domain_lookup.stdout_lines | map('split') | map('first') | unique | list
+    item.rc != 0 or
+    (item.stdout_lines | map('split') | map('first') | unique | list
      | intersect(ansible_facts['all_ipv4_addresses']) | length == 0)

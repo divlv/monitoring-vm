@@ -1,17 +1,17 @@
 # {{ ansible_managed }}
 #
-# Uptime Kuma {{ kuma_image | regex_replace('^.*:', '') }} on K3s, published by the bundled Traefik at https://{{ cfg.domain }}.
-# Data (SQLite) lives in {{ kuma_data_dir }} on this server. One replica with the Recreate
+# Uptime Kuma {{ kuma_image | regex_replace('^.*:', '') }} of the site "{{ site.id }}" on K3s, published by the bundled Traefik at https://{{ site.domain }}.
+# Data (SQLite) lives in {{ site.data_dir }} on this server. One replica with the Recreate
 # strategy: SQLite on a single volume must never be opened by two pods at once.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ kuma_namespace }}
+  name: {{ site.namespace }}
 ---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: uptime-kuma-data-pv
+  name: {{ site.pv }}
 spec:
   capacity:
     storage: 1Gi
@@ -20,14 +20,14 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: ""
   hostPath:
-    path: {{ kuma_data_dir }}
+    path: {{ site.data_dir }}
     type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: uptime-kuma-data
-  namespace: {{ kuma_namespace }}
+  namespace: {{ site.namespace }}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -35,13 +35,13 @@ spec:
     requests:
       storage: 1Gi
   storageClassName: "" # must stay empty, otherwise the default (local-path) class would take over
-  volumeName: uptime-kuma-data-pv
+  volumeName: {{ site.pv }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: uptime-kuma
-  namespace: {{ kuma_namespace }}
+  namespace: {{ site.namespace }}
 spec:
   replicas: 1
   strategy:
@@ -104,7 +104,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: uptime-kuma
-  namespace: {{ kuma_namespace }}
+  namespace: {{ site.namespace }}
 spec:
   selector:
     app: uptime-kuma
@@ -116,7 +116,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: uptime-kuma
-  namespace: {{ kuma_namespace }}
+  namespace: {{ site.namespace }}
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
@@ -124,7 +124,7 @@ metadata:
     traefik.ingress.kubernetes.io/router.tls.certresolver: {{ acme_resolver }}
 spec:
   rules:
-    - host: {{ cfg.domain }}
+    - host: {{ site.domain }}
       http:
         paths:
           - path: /

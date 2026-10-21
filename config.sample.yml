@@ -7,9 +7,21 @@
 #
 # run_ansible.sh refuses to run while any value still contains CHANGE_ME.
 
-# Public host name of the Kuma UI. Its DNS A record must already point to this server,
-# because Traefik gets the HTTPS certificate with the Let's Encrypt HTTP-01 challenge.
-domain: status.example.com
+# Sites: ONE Uptime Kuma PER DOMAIN. A site's UI shows only its own Groups (listed below under
+# "groups"), nothing of the other sites; the Kuma admin login below is the same on every site.
+# Every Group must belong to exactly one site. Each domain's DNS A record must already point to
+# this server, because Traefik gets the HTTPS certificates with the Let's Encrypt HTTP-01 challenge.
+# `id`: lower-case letters, digits and '-'. The site with id "icf" is the Kuma that was installed
+# first and keeps its original Kubernetes names and data directory; other ids get their own.
+# (An older config with a single top-level `domain:` instead of `sites:` still works: one Kuma,
+# that domain, all Groups.)
+sites:
+  - id: icf
+    domain: status.example.com
+    groups: [ICFMonit]
+  - id: my
+    domain: status-my.example.com
+    groups: [MyMonit]
 
 # Let's Encrypt contact e-mail.
 acme_email: CHANGE_ME@example.com

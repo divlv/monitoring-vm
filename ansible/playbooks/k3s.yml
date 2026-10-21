@@ -27,9 +27,20 @@
     - { path: "{{ k3s_manifests_dir }}", mode: "0755" }
     # ACME certificates; Traefik runs as 65532 and creates acme_*.json (0600) here.
     - { path: "{{ traefik_data_dir }}", mode: "0700", owner: "{{ traefik_uid }}", group: "{{ traefik_uid }}" }
-    - { path: "{{ kuma_data_dir }}", mode: "0755" }
   loop_control:
     label: "{{ item.path }}"
+
+- name: K3s - data directory of each site's Kuma
+  ansible.builtin.file:
+    path: "{{ site.data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ kuma_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.data_dir }}"
 
 - name: K3s - /etc/rancher/k3s/config.yaml
   ansible.builtin.template:
@@ -41,7 +52,7 @@
   register: k3s_config
 
 # K3s watches this directory and (re)applies a file whenever it changes.
-- name: K3s - manifests (Traefik config, ACME volume, Uptime Kuma)
+- name: K3s - manifests (Traefik config, ACME volume)
   ansible.builtin.template:
     src: "{{ templates_dir }}/{{ item }}.j2"
     dest: "{{ k3s_manifests_dir }}/{{ item }}"
@@ -51,7 +62,19 @@
   loop:
     - traefik-config.yaml
     - traefik-acme.yaml
-    - uptime-kuma.yaml
+
+# One manifest (namespace, volume, deployment, service, ingress) per site: a separate Kuma each.
+- name: K3s - manifest of each site's Uptime Kuma
+  ansible.builtin.template:
+    src: "{{ templates_dir }}/uptime-kuma.yaml.j2"
+    dest: "{{ k3s_manifests_dir }}/{{ site.manifest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ kuma_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.manifest }}"
 
 - name: K3s - download the installer
   ansible.builtin.get_url:
@@ -96,8 +119,12 @@
       until: traefik_ready.rc == 0
       changed_when: false
   rescue:
+    # apply/tags: without it the included tasks would be skipped under --tags
     - name: K3s - collect diagnostics
-      ansible.builtin.include_tasks: diagnostics.yml
+      ansible.builtin.include_tasks:
+        file: diagnostics.yml
+        apply:
+          tags: [always]
 
     - name: K3s - Traefik did not come up
       ansible.builtin.fail:

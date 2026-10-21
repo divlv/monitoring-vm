@@ -10,11 +10,17 @@
       K3s, Kuma and the firewall (via autoexec.bat) come back up on their own.
   when: reboot_required.stat.exists
 
+- name: Report - the Kuma UI of each site
+  ansible.builtin.debug:
+    msg: "Kuma UI of site {{ item.id }}: https://{{ item.domain }} (Groups: {{ item.groups | join(', ') }}; log in as {{ cfg.kuma.admin_user }}, password: see the Private config)."
+  loop: "{{ sites }}"
+  loop_control:
+    label: "{{ item.id }}"
+
 - name: Report - summary
   ansible.builtin.debug:
     msg:
       - "RunId {{ run_id }} finished."
-      - "Kuma UI: https://{{ cfg.domain }} (log in as {{ cfg.kuma.admin_user }}; password: see the Private config)."
       - "Let's Encrypt resolver in use: {{ acme_resolver }}{{ ' (STAGING certificate - browsers will warn; set acme_use_staging: false and re-run for a trusted one)' if acme_resolver == 'staging' else '' }}."
       - "Check on the server: k3s kubectl get pods -A ; resolvectl status ; iptables -t mangle -S MVM_PRE ; iptables -S MVM_IN"
       - "Logs: {{ log_dir }}/ (run_*.log, kuma_provision_*.log, firewall.log)"
